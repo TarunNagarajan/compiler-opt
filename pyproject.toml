@@ -1,0 +1,11 @@
+[project]
+name = "compiler-opt"
+version = "0.1.0"
+description = "RL Guided Compiler Optimization"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gymnasium>=1.2.3",
+    "numpy>=2.4.1",
+    "stable-baselines3>=2.7.1",
+]
