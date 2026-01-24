@@ -19,15 +19,159 @@ This project explores several ideas that I haven't seen combined elsewhere:
 3. **Reward Hacking Investigation**: I've implemented two reward modes (`hackable` and `secure`) specifically to study and demonstrate reward hacking in compiler optimization RL. Early results show that the naive `hackable` agent achieves lower actual optimization (17.0%) despite getting higher rewards, while the `secure` agent with penalties achieves better optimization (19.7%) but with negative rewards during training.
 
 4. **Pass Sequence Analysis**: Tools to analyze what pass sequences the agents actually learn, measuring diversity, repetition patterns, and common transitions.
+
+## Proposed Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    INPUT LAYER                                               │
+│  ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────────────────────────┐  │
+│  │   PolyBench/C   │────▶│  clang -S -emit  │────▶│        LLVM IR (.ll files)          │  │
+│  │   30 Kernels    │     │     -llvm -O0    │     │   Unoptimized intermediate repr.    │  │
+│  └─────────────────┘     └──────────────────┘     └─────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               FEATURE EXTRACTION LAYER                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                        IR Parser + Feature Vector (128-dim)                          │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │   │
+│  │  │ Control Flow│  │  Data Flow  │  │  Call Graph │  │ Instruction │  │   Loop    │  │   │
+│  │  │  Features   │  │  Features   │  │  Features   │  │     Mix     │  │  Features │  │   │
+│  │  │ (BB count,  │  │ (mem ops,   │  │ (fn calls,  │  │ (arith,     │  │ (depth,   │  │   │
+│  │  │  branches)  │  │  loads)     │  │  recursion) │  │  logical)   │  │  count)   │  │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  └───────────┘  │   │
+│  └─────────────────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                          MACRO-LEVEL: MULTI-AGENT NEGOTIATION                                │
+│                                                                                              │
+│    ┌──────────────────────────────────────────────────────────────────────────────────┐    │
+│    │                           SPECIALIST AGENTS (4)                                   │    │
+│    │  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────────────┐ │    │
+│    │  │  Performance  │ │     Size      │ │   Security    │ │  Compilation Speed    │ │    │
+│    │  │     Agent     │ │    Agent      │ │    Agent      │ │        Agent          │ │    │
+│    │  │               │ │               │ │               │ │                       │ │    │
+│    │  │ Reward:       │ │ Reward:       │ │ Reward:       │ │ Reward:               │ │    │
+│    │  │ Speedup       │ │ Size reduce   │ │ Checks kept   │ │ Fast compilation      │ │    │
+│    │  │               │ │               │ │               │ │                       │ │    │
+│    │  │ Proposes:     │ │ Proposes:     │ │ Proposes:     │ │ Proposes:             │ │    │
+│    │  │ Macro +       │ │ Macro +       │ │ Macro +       │ │ Macro +               │ │    │
+│    │  │ Conviction    │ │ Conviction    │ │ Conviction    │ │ Conviction            │ │    │
+│    │  └───────┬───────┘ └───────┬───────┘ └───────┬───────┘ └───────────┬───────────┘ │    │
+│    └──────────┼─────────────────┼─────────────────┼─────────────────────┼─────────────┘    │
+│               │                 │                 │                     │                   │
+│               ▼                 ▼                 ▼                     ▼                   │
+│    ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│    │                        NEGOTIATION MODULE (Attention-based)                        │  │
+│    │  Round 1: Propose → Round 2: Observe & Revise → Round 3: Weighted Vote            │  │
+│    │                                                                                    │  │
+│    │  Output: Selected Macro-Action + Agent Weights                                     │  │
+│    └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                              │                                              │
+│                                              ▼                                              │
+│    ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│    │                          MACRO-ACTION CATALOG (12-18)                              │  │
+│    │  ┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────────────┐  │  │
+│    │  │ Aggressive Loop Opt │ │   Code Compression  │ │    Balanced General         │  │  │
+│    │  │ {loop-unroll,       │ │ {dce, gvn,          │ │ {mem2reg, inline,           │  │  │
+│    │  │  vectorize, licm}   │ │  instcombine}       │ │  instcombine, gvn}          │  │  │
+│    │  │ +12% speed, +18%    │ │ -8% size, -3% speed │ │ +5% speed, +5% size         │  │  │
+│    │  └─────────────────────┘ └─────────────────────┘ └─────────────────────────────┘  │  │
+│    └────────────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            MICRO-LEVEL: PASS REFINEMENT                                      │
+│                                                                                              │
+│    ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│    │                     MICRO-LEVEL AGENTS (Per Macro-Action)                          │  │
+│    │                                                                                    │  │
+│    │  Receives: Macro intent + Program features                                         │  │
+│    │                                                                                    │  │
+│    │  Refinement Actions:                                                               │  │
+│    │  ┌───────────────────┐ ┌───────────────────┐ ┌─────────────────────────────────┐  │  │
+│    │  │   Pass Ordering   │ │  Pass Parameters  │ │     Pass Inclusion/Exclusion   │  │  │
+│    │  │   (permutations)  │ │  (unroll factor,  │ │     (optional passes within    │  │  │
+│    │  │                   │ │   inline thresh)  │ │          macro template)       │  │  │
+│    │  └───────────────────┘ └───────────────────┘ └─────────────────────────────────┘  │  │
+│    └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                              │                                              │
+│                                              ▼                                              │
+│    ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│    │                           PASS EXECUTOR (LLVM opt)                                 │  │
+│    │   15 LLVM Passes: mem2reg, gvn, instcombine, loop-unroll, inline, licm,           │  │
+│    │                   dce, sccp, simplifycfg, reassociate, loop-rotate, etc.           │  │
+│    └────────────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                              METRICS & REWARD LAYER                                          │
+│                                                                                              │
+│    ┌─────────────────────────────────────────────────────────────────────────────────────┐ │
+│    │                           METRICS COLLECTOR                                          │ │
+│    │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌────────────────┐ │ │
+│    │  │   Instruction   │  │    Code Size    │  │   Compilation   │  │  Correctness   │ │ │
+│    │  │     Count       │  │     (bytes)     │  │      Time       │  │  Verification  │ │ │
+│    │  └─────────────────┘  └─────────────────┘  └─────────────────┘  └────────────────┘ │ │
+│    └─────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                              │                                              │
+│                                              ▼                                              │
+│    ┌─────────────────────────────────────────────────────────────────────────────────────┐ │
+│    │                           REWARD MODES                                               │ │
+│    │  ┌────────────────────────────────┐  ┌──────────────────────────────────────────┐  │ │
+│    │  │           HACKABLE             │  │                SECURE                     │  │ │
+│    │  │                                │  │                                          │  │ │
+│    │  │  Reward = instruction_reduction│  │  Reward = instruction_reduction          │  │ │
+│    │  │                                │  │           - 0.3 × size_penalty            │  │ │
+│    │  │  (Naive, exploitable)          │  │           - 0.1 × time_penalty            │  │ │
+│    │  │                                │  │           - 0.2 × repetition_penalty      │  │ │
+│    │  └────────────────────────────────┘  └──────────────────────────────────────────┘  │ │
+│    └─────────────────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               TRAINING & ANALYSIS                                            │
+│                                                                                              │
+│    ┌───────────────────────────────────────┐  ┌────────────────────────────────────────┐   │
+│    │        Stable-Baselines3 PPO          │  │           Analysis Tools               │   │
+│    │  • MAPPO for multi-agent training     │  │  • TensorBoard (reward curves)         │   │
+│    │  • Hierarchical gradients             │  │  • Pass sequence analysis              │   │
+│    │  • Consistency rewards                │  │  • Agent comparison                    │   │
+│    │  • Resume from checkpoint             │  │  • Negotiation pattern viz             │   │
+│    └───────────────────────────────────────┘  └────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Action Space**: 15 LLVM optimization passes (mem2reg, gvn, instcombine, loop-unroll, etc.)
+### Architecture Description
 
-**Observation Space**: 128-dimensional feature vector extracted from LLVM IR (instruction mix, basic block count, loop depth, memory operations, etc.)
+The system employs a **hierarchical multi-agent reinforcement learning** architecture comprising six principal layers:
 
-**Reward Function**:
-- **HACKABLE**: Simple instruction reduction percentage
-- **SECURE**: Instruction reduction minus penalties for size increase (0.3×), compile time (0.1×), and pass repetition (0.2×)
+**Input Layer**: Source programs from the PolyBench/C 4.2 benchmark suite are compiled to LLVM Intermediate Representation (IR) using Clang with optimization disabled (`-O0`). This produces a canonical, unoptimized IR suitable for downstream optimization experimentation.
+
+**Feature Extraction Layer**: A static analysis module parses the LLVM IR to extract a 128-dimensional feature vector encoding program characteristics. Features are partitioned into five categories: *control flow* (basic block count, branch density, CFG complexity), *data flow* (memory operations, load/store ratio, def-use chains), *call graph* (function calls, recursion indicators), *instruction mix* (arithmetic, logical, comparison distributions), and *loop features* (nesting depth, trip count estimates, induction variables).
+
+**Macro-Level Multi-Agent Negotiation**: Four specialist agents operate at the strategic level, each optimizing for a distinct objective:
+- **Performance Agent**: Maximizes execution speedup
+- **Size Agent**: Minimizes code size (instruction count, binary footprint)
+- **Security Agent**: Preserves security checks (bounds checking, stack canaries)
+- **Compilation Speed Agent**: Minimizes optimization overhead
+
+Each agent outputs a *macro-action proposal* (a high-level optimization strategy) paired with a *conviction score* representing confidence. An attention-based **negotiation module** mediates between agents through an iterative protocol: agents propose, observe peer proposals, revise with predicted outcomes, and resolve via weighted voting. The output is a selected macro-action from a catalog of 12-18 discovered optimization strategies (e.g., "Aggressive Loop Optimization", "Code Compression", "Balanced General").
+
+**Micro-Level Pass Refinement**: Given the selected macro-action and program features, micro-level agents refine the optimization sequence through three action types: *pass ordering* (permutations within the macro template), *pass parameters* (unroll factors, inline thresholds, vectorization width), and *pass inclusion/exclusion* (optional passes within the macro). This hierarchical decomposition reduces the effective action space from combinatorially large (200+ passes) to tractable subproblems.
+
+**Metrics & Reward Layer**: The **Pass Executor** applies the refined pass sequence via LLVM's `opt` tool. A **Metrics Collector** measures four quantities: instruction count, code size (object file bytes via `llc`), compilation time, and semantic correctness (output equivalence verification). Two reward modes are implemented:
+- **HACKABLE**: Naive reward `R = instruction_reduction` (susceptible to reward hacking)
+- **SECURE**: Penalized reward `R = instruction_reduction - 0.3×size_penalty - 0.1×time_penalty - 0.2×repetition_penalty`
+
+**Training & Analysis Layer**: Training employs **Proximal Policy Optimization (PPO)** from Stable-Baselines3, with **MAPPO** extensions for multi-agent coordination. Hierarchical training proceeds either sequentially (macro-first, then micro) or jointly with shared gradients. Consistency rewards penalize macro-micro disagreements. Analysis tools include TensorBoard integration for reward curves, pass sequence analyzers for diversity metrics, and agent comparison utilities for ablation studies.
 
 ## Prerequisites
 
