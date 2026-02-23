@@ -1,0 +1,58 @@
+{
+  "version": "4.2.1",
+  "description": "PolyBench/C benchmark suite for polyhedral optimization research",
+  "categories": {
+    "datamining": {
+      "description": "Statistical and data analysis kernels",
+      "benchmarks": ["correlation", "covariance"]
+    },
+    "linear-algebra": {
+      "description": "BLAS-like operations and matrix decompositions",
+      "benchmarks": [
+        "2mm", "3mm", "atax", "bicg", "cholesky", "doitgen", "durbin",
+        "gemm", "gemver", "gesummv", "gramschmidt", "lu", "ludcmp",
+        "mvt", "symm", "syr2k", "syrk", "trisolv", "trmm"
+      ]
+    },
+    "medley": {
+      "description": "Miscellaneous algorithms",
+      "benchmarks": ["deriche", "floyd-warshall", "nussinov"]
+    },
+    "stencils": {
+      "description": "Iterative stencil computations",
+      "benchmarks": ["adi", "fdtd-2d", "heat-3d", "jacobi-1d", "jacobi-2d", "seidel-2d"]
+    }
+  },
+  "benchmark_metadata": {
+    "2mm": {"loop_depth": 3, "data_type": "double"},
+    "3mm": {"loop_depth": 3, "data_type": "double"},
+    "atax": {"loop_depth": 2, "data_type": "double"},
+    "bicg": {"loop_depth": 2, "data_type": "double"},
+    "cholesky": {"loop_depth": 3, "data_type": "double"},
+    "correlation": {"loop_depth": 3, "data_type": "double"},
+    "covariance": {"loop_depth": 3, "data_type": "double"},
+    "deriche": {"loop_depth": 2, "data_type": "double"},
+    "doitgen": {"loop_depth": 4, "data_type": "double"},
+    "durbin": {"loop_depth": 2, "data_type": "double"},
+    "floyd-warshall": {"loop_depth": 3, "data_type": "int"},
+    "gemm": {"loop_depth": 3, "data_type": "double"},
+    "gemver": {"loop_depth": 2, "data_type": "double"},
+    "gesummv": {"loop_depth": 2, "data_type": "double"},
+    "gramschmidt": {"loop_depth": 3, "data_type": "double"},
+    "heat-3d": {"loop_depth": 4, "data_type": "double"},
+    "jacobi-1d": {"loop_depth": 2, "data_type": "double"},
+    "jacobi-2d": {"loop_depth": 3, "data_type": "double"},
+    "lu": {"loop_depth": 3, "data_type": "double"},
+    "ludcmp": {"loop_depth": 3, "data_type": "double"},
+    "mvt": {"loop_depth": 2, "data_type": "double"},
+    "nussinov": {"loop_depth": 3, "data_type": "int"},
+    "seidel-2d": {"loop_depth": 3, "data_type": "double"},
+    "symm": {"loop_depth": 3, "data_type": "double"},
+    "syr2k": {"loop_depth": 3, "data_type": "double"},
+    "syrk": {"loop_depth": 3, "data_type": "double"},
+    "trisolv": {"loop_depth": 2, "data_type": "double"},
+    "trmm": {"loop_depth": 3, "data_type": "double"},
+    "adi": {"loop_depth": 3, "data_type": "double"},
+    "fdtd-2d": {"loop_depth": 3, "data_type": "double"}
+  }
+}
