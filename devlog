@@ -1,0 +1,112 @@
+# Devlog.
+
+01. Reward Hacking Comparison, Instruction Count vs. Binary Size
+
+======================================================================
+ REWARD HACKING COMPARISON
+======================================================================
+Metric                                   HACKABLE             SECURE
+----------------------------------------------------------------------
+Instruction Reduction                       48.9%              61.9%
+Size Change                                 -8.3%              -4.2%
+Compile Time                              315.0ms            298.0ms
+Pass Diversity                               0.15                0.2
+Repeated Passes                               8.3                8.0
+Episode Reward                             0.5532            -0.8654
+======================================================================
+
+'''
+uv run python scripts/evaluate_hacking.py results/baseline/2mm_base.ll results/baseline/adi_base.ll results/baseline/correlation_base.ll --hackable models/ppo_hackable.zip --secure models/ppo_secure.zip
+'''
+
+Instruction reduction and Binary size are correlated but not identical. Agressive inlining would ensure that the mutliple management instructions are removed from the IR, but this could involve copying the function contents mutliple times. 
+
+An increased binary size would hurt if the the program doesn't fit in the L1 Instruction Cache (I-Cache). This will make the program run slower anyways because of instruction cache misses.
+
+02. Break and Fix, instcombine
+
+instcombine is a peephold optimizer which does a simple rearrangement. There could be another pass that would counter this and these two would then go back and forth, trying to fix the mess that the other creates.
+
+03. Confusion for Branch Predictors
+
+Branch prediction could break over agressive instruction folding, so much to the point where the natural flow for a program being executed by the CPU would break, and then this creates issues on its own.
+
+04. SROA payoff with delayed returns
+
+Goes from struct to variables. The problem lies with when SROA is applied, so the system will have to identify the optimal sequence to apply these things. That's a part of the phase-ordering problem.
+
+
+
+
+
+
+
+
+05. World Model Bottlenecks: Meaningless Embeddings & Sparsity
+
+======================================================================
+ WORLD MODEL EVALUATION (R2 SCORE)
+======================================================================
+Metric                                   PREDICTION ACCURACY (R2)
+----------------------------------------------------------------------
+Instruction Delta                             0.2136
+Size Delta                                    0.0000
+Compile Time                                 -1.6149
+======================================================================
+
+'''
+uv run python scripts/visualize_world_model.py
+'''
+
+1. The "Meaningless Embedding" Problem:
+Seeding the GNN makes it stable, but the weights are random projections. The model isn't learning what code "means," only how random patterns shift. We need joint pre-training or self-supervision to make the latent space meaningful.
+
+2. Metric Sparsity (The "Zero Problem"):
+Approx 65% of passes do nothing. This creates a dense cluster at (0,0) that the model overfits to, leading to zero-prediction bias. We need to filter no-ops during collection.
+
+3. Hardware Jitter (Timing Noise):
+Compile time is not deterministic on shared hardware. CPU context switching creates spikes that make "time" unpredictable. We must switch to deterministic "Instruction Cycles" or IR complexity as a proxy.
+
+4. Benchmark Fragility:
+MiBench has high dependency noise. We need automated "header injection" or synthetic generation via Csmith to ensure 100% compilable, varied data.
+[Status] Implemented custom Python-based C Generator (`scripts/acquire_synthetic.py`).
+- Generates 1000+ self-contained benchmarks with loops/arrays/branches.
+- Fixed scoping bug where "reduction" kernels caused variable redefinition errors.
+- Expecting 100% compilation success rate.
+
+[UPDATE] Dataset Health Check:
+- MiBench: 750/1089 files (68.9%) are currently uncompilable due to missing headers/Makefiles.
+- AnghaBench: 0/297 files broken (All fixed).
+- PolyBench: 0/33 files broken.
+- Total "Problematic" Snippets: 750.
+- Recommendation: Synthetic Augmentation is highly recommended to replace these 750 lost data points.
+
+06. Thorough World Model & The "Lookahead Hallucination" Discovery
+
+======================================================================
+ THOROUGH WORLD MODEL EVALUATION (R2 SCORE)
+======================================================================
+Metric                                   PREDICTION ACCURACY (R2)
+----------------------------------------------------------------------
+Instruction Delta                             0.5997
+Basic Blocks Delta                            0.4048
+Complexity Delta                              0.0793
+======================================================================
+
+'''
+uv run python scripts/visualize_world_model.py --name thorough
+'''
+
+1. The "Success" of Joint Training:
+By training the GNN encoder and the World Model together on 40,000 transitions, we've achieved a high R2 (>0.5) for performance. The model now has a solid "intuitive" understanding of how individual LLVM passes work on diverse IR graphs.
+
+2. Discovery: The "Saturation Hallucination" Bug:
+While single-step prediction is accurate, multi-step "lookahead" (imagination) tends to drift. Specifically, the model is "over-confident"—it predicts consistent gains even when a pass is repeated or applied to already optimized code.
+
+3. Root Cause: Data Bias (No-Op Filtering):
+To help the model learn the "signal" faster, we filtered 90% of No-Op transitions during initial training. This inadvertently taught the model that passes almost always succeed. It lacks knowledge of "Optimization Saturation" (diminishing returns).
+
+4. Mitigation Plan: "Saturation Fine-Tuning":
+- Relax No-Op filtering to 50% during data collection.
+- Explicitly collect "saturation" sequences (e.g., repeating the same pass, or applying cleanup passes to clean code).
+- Fine-tune the 'thorough' model using these harder negative examples to teach it when a pass should return 0.0 delta.
