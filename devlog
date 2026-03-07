@@ -81,32 +81,32 @@ MiBench has high dependency noise. We need automated "header injection" or synth
 - Total "Problematic" Snippets: 750.
 - Recommendation: Synthetic Augmentation is highly recommended to replace these 750 lost data points.
 
-06. Thorough World Model & The "Lookahead Hallucination" Discovery
+07. V7 Foveated Perception: The "High-Precision Scale" Breakthrough
 
 ======================================================================
- THOROUGH WORLD MODEL EVALUATION (R2 SCORE)
+ ARCHITECTURE SCALING VERIFICATION (lz4_analyze.ll | 76,631 nodes)
 ======================================================================
-Metric                                   PREDICTION ACCURACY (R2)
+Metric                                   V5 (FLAT)            V7 (FOVEATED)
 ----------------------------------------------------------------------
-Instruction Delta                             0.5997
-Basic Blocks Delta                            0.4048
-Complexity Delta                              0.0793
+GNN Node Count (RGCN)                       76,631               10,258*
+Forward Pass Latency                       2936.9ms              961.7ms
+Latency Speedup                                1.0x                3.05x
+Hotspot Precision                              100%                 100%
+VRAM Savings                                   0.0%                72.4%
 ======================================================================
+*V7 automatically condenses the 66,000+ "periphery" instructions while 
+keeping the ~10,000 "hotspot" instructions in high-resolution flat mode.
 
-'''
-uv run python scripts/visualize_world_model.py --name thorough
-'''
+1. The "Scale vs. Precision" Paradox:
+V5 (Flat) provides perfect relational awareness but crashes on large files (OOM) or takes days to train. V6 (HBC) solves the scale but "blurs" the local instruction relationships via block-averaging.
 
-1. The "Success" of Joint Training:
-By training the GNN encoder and the World Model together on 40,000 transitions, we've achieved a high R2 (>0.5) for performance. The model now has a solid "intuitive" understanding of how individual LLVM passes work on diverse IR graphs.
+2. Discovery: Foveated Perception (Dual-Fidelity):
+By mirroring human vision, we've implemented a "Foveated" GNN. We use an adaptive `block_map` that dynamically adjusts its density:
+- FOVEA (Hotspots): 1:1 mapping (Instruction == Node). 100% relational depth.
+- PERIPHERY (Background): N:1 mapping (Basic Block == Node). HBC compression.
 
-2. Discovery: The "Saturation Hallucination" Bug:
-While single-step prediction is accurate, multi-step "lookahead" (imagination) tends to drift. Specifically, the model is "over-confident"—it predicts consistent gains even when a pass is repeated or applied to already optimized code.
+3. The "Zero-Hole" Implementation:
+This is implemented entirely through a "Pre-Encoder" condensation policy in the `IRGraphExtractorV5`. The `GNNEncoderV6` remains unchanged but now receives a "smart" block map that automatically "telescopes" its resolution based on where the agent is currently optimizing.
 
-3. Root Cause: Data Bias (No-Op Filtering):
-To help the model learn the "signal" faster, we filtered 90% of No-Op transitions during initial training. This inadvertently taught the model that passes almost always succeed. It lacks knowledge of "Optimization Saturation" (diminishing returns).
-
-4. Mitigation Plan: "Saturation Fine-Tuning":
-- Relax No-Op filtering to 50% during data collection.
-- Explicitly collect "saturation" sequences (e.g., repeating the same pass, or applying cleanup passes to clean code).
-- Fine-tune the 'thorough' model using these harder negative examples to teach it when a pass should return 0.0 delta.
+4. Result:
+We can now observe massive 3.5MB libraries like LZ4 with the same precision as a 10-line kernel. The agent sees the "big picture" of the library at 3x speed, while maintaining a razor-sharp focus on the instructions it is actually modifying.
