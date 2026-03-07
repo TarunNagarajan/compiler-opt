@@ -31,6 +31,24 @@ To scale to industrial-size programs (e.g., 3.5MB+ LLVM modules) without losing 
 *   **The Periphery (Context)**: The remainder of the program is condensed using **Hierarchical Block Condensation (HBC)**. Multiple instructions are pooled into a single "Block-Node," providing global context at a fraction of the computational cost.
 *   **Efficiency**: This dual-fidelity approach achieves a **3.05x speedup** and **86% reduction in GNN nodes** compared to flat architectures, enabling the model to "see" entire libraries while focusing on specific kernels.
 
+#### Technical Implementation (V7)
+
+The Foveated Engine is implemented as a resolution-independent pipeline across the extractor and the encoder:
+
+1.  **Adaptive `block_map` Generation**:
+    *   The `IRGraphExtractorV5` parses the full module. For each instruction $i$, it assigns an active ID $B_i$.
+    *   **In Fovea**: $B_i = \text{unique\_id}(i)$, resulting in a 1:1 Identity Mapping.
+    *   **In Periphery**: $B_i = \text{parent\_block\_id}(i)$, resulting in an N:1 Condensation Mapping.
+2.  **Hierarchical Block Condensation (HBC)**:
+    *   The `GNNEncoderV6` receives the raw instruction features $X$ and the `block_map`.
+    *   **Condensation Phase**: It uses `scatter_mean(X, block_map)` to pool instruction features into condensed "Active Nodes."
+    *   **Edge Lifting**: Instruction-level edges $(u, v)$ are lifted to active-node edges $(B_u, B_v)$.
+3.  **Relational Convolution (RGCN)**:
+    *   The expensive 6-layer Relational GCN runs exclusively on the condensed active-node graph. Complexity is reduced from $O(N_{\text{instr}})$ to $O(N_{\text{active\_id}})$.
+4.  **Instruction-Level Re-Expansion**:
+    *   Post-convolution, active-node embeddings are mapped back to instructions: $X'_{\text{instr}} = X'_{\text{active}}[B_i]$.
+    *   **Attentional Aggregation**: The final graph embedding is computed via a learned attention gate over the re-expanded instructions, allowing the model to "pick out" critical instructions even if they were condensed during reasoning.
+
 **Input Layer**: Source programs from the PolyBench/C 4.2 benchmark suite are compiled to LLVM Intermediate Representation (IR) using Clang with optimization disabled (`-O0`). This produces a canonical, unoptimized IR suitable for downstream optimization experimentation.
 
 **Feature Extraction Layer**: A static analysis module parses the LLVM IR to extract a 128-dimensional feature vector encoding program characteristics. Features are partitioned into five categories: *control flow* (basic block count, branch density, CFG complexity), *data flow* (memory operations, load/store ratio, def-use chains), *call graph* (function calls, recursion indicators), *instruction mix* (arithmetic, logical, comparison distributions), and *loop features* (nesting depth, trip count estimates, induction variables).
