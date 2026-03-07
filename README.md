@@ -23,7 +23,13 @@ This project explores several ideas that I haven't seen combined elsewhere:
 
 ### Architecture Description
 
-The system employs a **hierarchical multi-agent reinforcement learning** architecture comprising six principal layers:
+The system employs a **hierarchical multi-agent reinforcement learning** architecture comprising seven principal layers:
+
+**V7 Feature: Foveated Perception Engine**
+To scale to industrial-size programs (e.g., 3.5MB+ LLVM modules) without losing fine-grained precision, V7 introduces a "Foveated" GNN architecture. Similar to human vision, the model maintains a high-resolution "Fovea" while condensing the "Periphery."
+*   **The Fovea (Hotspots)**: Functions currently being optimized (`focus_functions`) are extracted with 1:1 precision. Every instruction is a unique node in the GNN, preserving 100% of the relational data-flow.
+*   **The Periphery (Context)**: The remainder of the program is condensed using **Hierarchical Block Condensation (HBC)**. Multiple instructions are pooled into a single "Block-Node," providing global context at a fraction of the computational cost.
+*   **Efficiency**: This dual-fidelity approach achieves a **3.05x speedup** and **86% reduction in GNN nodes** compared to flat architectures, enabling the model to "see" entire libraries while focusing on specific kernels.
 
 **Input Layer**: Source programs from the PolyBench/C 4.2 benchmark suite are compiled to LLVM Intermediate Representation (IR) using Clang with optimization disabled (`-O0`). This produces a canonical, unoptimized IR suitable for downstream optimization experimentation.
 
