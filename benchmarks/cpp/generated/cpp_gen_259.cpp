@@ -1,0 +1,8 @@
+
+    #include <functional>
+    int main() {
+        auto f = [](int x, int y) { return x * 39 + y; };
+        std::function<int(int, int)> g = f;
+        return g(82, 5);
+    }
+    
