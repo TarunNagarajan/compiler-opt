@@ -1,11 +1,12 @@
 import subprocess
 import tempfile
 import shutil
+import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
-from ..config import OPT, CLANG, LLVM_PASSES
+from ..config import OPT, CLANG, CLANG_CXX, LLVM_PASSES
 
 
 @dataclass
@@ -38,8 +39,10 @@ class PassExecutor:
             )
         
         if output_path is None:
-            suffix = "_" + "_".join(passes[:3])
-            output_path = self.work_dir / f"{ir_path.stem}{suffix}.ll"
+            # Use a fixed short name to avoid Windows filename length limits (Invalid Argument error)
+            # We use a simple counter style or fixed name because the executor workspace is already unique per episode.
+            self._file_counter = getattr(self, "_file_counter", 0) + 1
+            output_path = self.work_dir / f"step_{self._file_counter}.ll"
         output_path = Path(output_path)
         
         pass_args = ",".join(passes)
@@ -97,7 +100,8 @@ class PassExecutor:
         current_ir = ir_path
         
         for i, pass_name in enumerate(pass_sequence):
-            output_path = self.work_dir / f"step_{i}_{pass_name}.ll"
+            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', pass_name)
+            output_path = self.work_dir / f"step_{i}_{safe_name}.ll"
             result = self.apply_pass(current_ir, pass_name, str(output_path))
             results.append(result)
             
@@ -120,11 +124,15 @@ def compile_to_ir(source_path: str, output_path: Optional[str] = None) -> Tuple[
         output_path = source_path.with_suffix('.ll')
     output_path = Path(output_path)
     
+    compiler = CLANG_CXX if source_path.suffix.lower() in {".cpp", ".cc", ".cxx"} else CLANG
     cmd = [
-        str(CLANG),
+        str(compiler),
         "-S", "-emit-llvm",
         "-O0",
         "-Xclang", "-disable-O0-optnone",
+        "-Wno-error", 
+        "-Wno-implicit-function-declaration",
+        "-Wno-everything", # Be very lenient
         str(source_path),
         "-o", str(output_path)
     ]
@@ -142,8 +150,7 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 3:
-        print("Usage: python pass_executor.py <ir_file.ll> <pass_name> [pass_name2 ...]")
-        print(f"\nAvailable passes: {', '.join(LLVM_PASSES)}")
+        print("[AGENT] Usage: python pass_executor.py <ir_file.ll> <pass_name> [pass_name2 ...]...")
         sys.exit(1)
     
     ir_file = sys.argv[1]
@@ -151,20 +158,12 @@ if __name__ == "__main__":
     
     executor = PassExecutor()
     
-    print(f"Applying passes {passes} to {ir_file}...")
+    print(f"[AGENT] Applying passes {passes} to {ir_file}...")
     result = executor.apply_passes(ir_file, passes)
     
     if result.success:
-        print(f"✓ Success! Output: {result.output_path}")
-        
-        from ..features import extract_features
-        f1 = extract_features(ir_file)
-        f2 = extract_features(result.output_path)
-        
-        import numpy as np
-        diff = np.linalg.norm(f2 - f1)
-        print(f"  Feature distance: {diff:.4f}")
+        print(f"[AGENT] Success! Output: {result.output_path}...")
     else:
-        print(f"✗ Failed: {result.error_message}")
+        print(f"[AGENT] Failed: {result.error_message}...")
     
     executor.cleanup()

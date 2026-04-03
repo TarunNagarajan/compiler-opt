@@ -1,364 +1,41 @@
 # Multi-Agent Hierarchical Reinforcement Learning for Compiler Optimization
 
-## Problem Statement
+A framework for training and evaluating hierarchical reinforcement learning (HRL) agents to optimize LLVM IR. The system uses a decomposed world model with residual scale correction to predict the impact of optimization passes across varying module sizes.
 
-Modern compilers like GCC and LLVM ship with hundreds of optimization passes, but selecting the right sequence remains a black art. The standard `-O2` and `-O3` flags apply a fixed, one-size-fits-all pipeline that often leaves performance on the table or worse, sometimes _increases_ code size (see jacobi-1d at -O2: -51.9% instruction "reduction"). 
+## Architecture
 
-The core challenge is that optimization passes interact in complex, non-linear ways. A pass that helps one program might hurt another. Loop unrolling might expose vectorization opportunities in one kernel but bloat the instruction cache in another. There's no closed-form solution here; it's fundamentally a sequential decision-making problem under uncertainty.
+The system consists of three primary components:
 
-I'm also interested in the **reward hacking** phenomenon in RL-based compiler optimization. Naive reward functions that only optimize for instruction count can lead agents to exploit loopholes (repeating the same pass, ignoring code size explosion, etc.) rather than finding genuinely good optimization sequences.
-
-## Novelty
-
-This project explores several ideas that I haven't seen combined elsewhere:
-
-1. **Hierarchical Macro/Micro Decision Making**: Instead of treating all 200+ LLVM passes equally, I'm classifying them into macro-level strategic decisions (loop optimizations, vectorization, inlining policies) and micro-level tactical passes (dead code elimination, constant folding). The idea is that a high-level agent picks the strategy, and a low-level agent handles the details.
-
-2. **Multi-Objective Agent Negotiation**: Rather than scalarizing instruction count, code size, and compile time into a single reward, I'm experimenting with separate agents that "negotiate" over these objectives. This should handle Pareto-optimal tradeoffs more gracefully than weighted sums.
-
-3. **Reward Hacking Investigation**: I've implemented two reward modes (`hackable` and `secure`) specifically to study and demonstrate reward hacking in compiler optimization RL. Early results show that the naive `hackable` agent achieves lower actual optimization (17.0%) despite getting higher rewards, while the `secure` agent with penalties achieves better optimization (19.7%) but with negative rewards during training.
-
-4. **Pass Sequence Analysis**: Tools to analyze what pass sequences the agents actually learn, measuring diversity, repetition patterns, and common transitions.
-
-
-### Architecture Description
-
-The system employs a **hierarchical multi-agent reinforcement learning** architecture comprising seven principal layers:
-
-**V7 Feature: Foveated Perception Engine**
-To scale to industrial-size programs (e.g., 3.5MB+ LLVM modules) without losing fine-grained precision, V7 introduces a "Foveated" GNN architecture. Similar to human vision, the model maintains a high-resolution "Fovea" while condensing the "Periphery."
-*   **The Fovea (Hotspots)**: Functions currently being optimized (`focus_functions`) are extracted with 1:1 precision. Every instruction is a unique node in the GNN, preserving 100% of the relational data-flow.
-*   **The Periphery (Context)**: The remainder of the program is condensed using **Hierarchical Block Condensation (HBC)**. Multiple instructions are pooled into a single "Block-Node," providing global context at a fraction of the computational cost.
-*   **Efficiency**: This dual-fidelity approach achieves a **3.05x speedup** and **86% reduction in GNN nodes** compared to flat architectures, enabling the model to "see" entire libraries while focusing on specific kernels.
-
-#### [NEW] V7: Solving Predictive Intuition (The Fail-Safe Architecture)
-
-The V7 World Model represents a fundamental shift from simple regression to **Categorical Distributional Reasoning**. It was designed to solve two broad classes of failures observed in earlier versions:
-
-##### 1. The "Math" Failures (Scaling & Gradients)
-Previous versions (v1-v6) predicted continuous scalars for optimization gains and optimized using Mean Squared Error (MSE). This led to:
-*   **The Linear Trap**: A 1% win in a 100,000-instruction file created a gradient 1000x larger than a 10% win in a 100-instruction file. The model would "ignore" small files to chase the absolute numbers of large files.
-*   **Exponential Echo**: Because optimization is non-linear, small prediction errors in early layers would expand into "3,851.0" error reports or NaNs during backpropagation.
-
-**The Fix: Two-Hot SymLog Binning**. V7 replaces the regression head with a **Categorical Head** spanning 255 discrete bins from -20% to +20% in SymLog space. By minimizing Cross-Entropy rather than MSE, all gradients are strictly bounded between $[-1, 1]$. This makes the "bullying" of small files mathematically impossible and ensures the model never "explodes" numerically.
-
-##### 2. The "Intelligence" Failures (Signal Drowning & Scale Shyness)
-Traditional conditioning (linear shifts or FiLM) struggled to tell the model *how* an action would interact with a specific file scale.
-*   **Signal Drowning**: The "Action" (e.g., *Inlining*) was simply added to the "State." In large files, the state vector is so dense that the action signal was drowned out, leading the model to guess nearly identical "Before" and "After" pictures.
-*   **Scale Shyness**: The model was afraid to guess large numbers for large files because it lacked a native sense of complexity.
-
-**The Fix: Action-State Attention & Context Scaling**. V7 abandons linear conditioning for a **Multi-Head Cross-Attention** mechanism. The action now behaves as a **Query** that specifically queries the state for relevant features (e.g., *Inlining queries the Call Graph*). Additionally, file complexity (`log10(num_nodes)`) is projected into a dedicated **Context Embedding** that serves as a learnable bias, giving the model a native "sense" of magnitude.
-
-##### Performance Proof (Iteration 9)
-In recent stress tests, V7 maintained a **MetricErr of 0.0037 (0.37% error)** on an LZ4 benchmark with **4,644 basic blocks**. Even after **10 recursive lookahead steps**, the model maintains a **1.1% accuracy** (Iteration 13), proving it can "imagine" long-term trajectories without losing its grip on reality.
-
-#### Technical Implementation (V7)
-
-The Foveated Engine is implemented as a resolution-independent pipeline across the extractor and the encoder:
-
-1.  **Adaptive `block_map` Generation**:
-    *   The `IRGraphExtractorV5` parses the full module. For each instruction $i$, it assigns an active ID $B_i$.
-    *   **In Fovea**: $B_i = \text{unique\_id}(i)$, resulting in a 1:1 Identity Mapping.
-    *   **In Periphery**: $B_i = \text{parent\_block\_id}(i)$, resulting in an N:1 Condensation Mapping.
-2.  **Hierarchical Block Condensation (HBC)**:
-    *   The `GNNEncoderV6` receives the raw instruction features $X$ and the `block_map`.
-    *   **Condensation Phase**: It uses `scatter_mean(X, block_map)` to pool instruction features into condensed "Active Nodes."
-    *   **Edge Lifting**: Instruction-level edges $(u, v)$ are lifted to active-node edges $(B_u, B_v)$.
-3.  **Relational Convolution (RGCN)**:
-    *   The expensive 6-layer Relational GCN runs exclusively on the condensed active-node graph. Complexity is reduced from $O(N_{\text{instr}})$ to $O(N_{\text{active\_id}})$.
-4.  **Instruction-Level Re-Expansion**:
-    *   Post-convolution, active-node embeddings are mapped back to instructions: $X'_{\text{instr}} = X'_{\text{active}}[B_i]$.
-    *   **Attentional Aggregation**: The final graph embedding is computed via a learned attention gate over the re-expanded instructions, allowing the model to "pick out" critical instructions even if they were condensed during reasoning.
-
-**Input Layer**: Source programs from the PolyBench/C 4.2 benchmark suite are compiled to LLVM Intermediate Representation (IR) using Clang with optimization disabled (`-O0`). This produces a canonical, unoptimized IR suitable for downstream optimization experimentation.
-
-**Feature Extraction Layer**: A static analysis module parses the LLVM IR to extract a 128-dimensional feature vector encoding program characteristics. Features are partitioned into five categories: *control flow* (basic block count, branch density, CFG complexity), *data flow* (memory operations, load/store ratio, def-use chains), *call graph* (function calls, recursion indicators), *instruction mix* (arithmetic, logical, comparison distributions), and *loop features* (nesting depth, trip count estimates, induction variables).
-
-**Macro-Level Multi-Agent Negotiation**: Four specialist agents operate at the strategic level, each optimizing for a distinct objective:
-- **Performance Agent**: Maximizes execution speedup
-- **Size Agent**: Minimizes code size (instruction count, binary footprint)
-- **Security Agent**: Preserves security checks (bounds checking, stack canaries)
-- **Compilation Speed Agent**: Minimizes optimization overhead
-
-Each agent outputs a *macro-action proposal* (a high-level optimization strategy) paired with a *conviction score* representing confidence. An attention-based **negotiation module** mediates between agents through an iterative protocol: agents propose, observe peer proposals, revise with predicted outcomes, and resolve via weighted voting. The output is a selected macro-action from a catalog of 12-18 discovered optimization strategies (e.g., "Aggressive Loop Optimization", "Code Compression", "Balanced General").
-
-**Micro-Level Pass Refinement**: Given the selected macro-action and program features, micro-level agents refine the optimization sequence through three action types: *pass ordering* (permutations within the macro template), *pass parameters* (unroll factors, inline thresholds, vectorization width), and *pass inclusion/exclusion* (optional passes within the macro). This hierarchical decomposition reduces the effective action space from combinatorially large (200+ passes) to tractable subproblems.
-
-**Metrics & Reward Layer**: The **Pass Executor** applies the refined pass sequence via LLVM's `opt` tool. A **Metrics Collector** measures four quantities: instruction count, code size (object file bytes via `llc`), compilation time, and semantic correctness (output equivalence verification). Two reward modes are implemented:
-- **HACKABLE**: Naive reward `R = instruction_reduction` (susceptible to reward hacking)
-- **SECURE**: Penalized reward `R = instruction_reduction - 0.3×size_penalty - 0.1×time_penalty - 0.2×repetition_penalty`
-
-**Training & Analysis Layer**: Training employs **Proximal Policy Optimization (PPO)** from Stable-Baselines3, with **MAPPO** extensions for multi-agent coordination. Hierarchical training proceeds either sequentially (macro-first, then micro) or jointly with shared gradients. Consistency rewards penalize macro-micro disagreements. Analysis tools include TensorBoard integration for reward curves, pass sequence analyzers for diversity metrics, and agent comparison utilities for ablation studies.
-
-## Prerequisites
-
-- **LLVM Toolchain** (v14+): clang, opt, llc, llvm-as
-  - I'm using LLVM 21.1.8 on Windows
-  - On Ubuntu: `apt install llvm clang`
-  - On macOS: `brew install llvm`
-
-- **Python 3.10+** with the following packages:
-  - stable-baselines3 (PPO implementation)
-  - gymnasium (RL environment interface)
-  - numpy (numerical operations)
-  - tensorboard (training visualization)
-
-- **uv** (Python package manager): https://docs.astral.sh/uv/
-  - Handles virtual environment and dependencies automatically
-  - Install: `pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
-
-## Tools Used
-
-| Tool | Purpose |
-|------|---------|
-| **LLVM/Clang** | Compiler infrastructure, IR generation, optimization passes |
-| **Python** | Scripting, RL agent, feature extraction |
-| **Stable-Baselines3** | PPO algorithm implementation |
-| **Gymnasium** | RL environment standard interface |
-| **TensorBoard** | Training visualization and reward curves |
-| **PolyBench/C 4.2** | 30 numerical kernels for benchmarking |
-| **uv** | Fast Python package manager |
+1.  **World Model**: A structure-aware transition and metric prediction model built on GATv2 graph neural networks. It incorporates a scale correction pathway to maintain prediction accuracy for large-scale industrial modules.
+2.  **HRL Agent**: A hierarchical policy comprising a strategic manager and a tactical worker. The manager negotiates over optimization objectives (e.g., speed, size, energy) to select macro-actions, which the worker then refines with tactical passes.
+3.  **Compiler Environment**: A high-fidelity environment for LLVM IR manipulation, featuring hardware-aware profiling and robust runtime measurement.
 
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/compiler-opt.git
-cd compiler-opt
 uv sync
 ```
 
-Verify LLVM is installed:
-```bash
-clang --version
-opt --version
-```
+## Usage
 
-Compile benchmarks to IR:
-```bash
-uv run python scripts/run_baseline_report.py
-```
-
-## Quick Start
+### Training the World Model
 
 ```bash
-uv run python scripts/train_baseline.py results/baseline/*.ll --mode hackable --timesteps 50000 --run-name hackable_50k
-uv run tensorboard --logdir logs/tensorboard
+python scripts/train_world_model.py --dataset path/to/dataset.json
 ```
 
-## Training Commands
-
-### Train with Different Reward Modes
+### Training the HRL Agent
 
 ```bash
-uv run python scripts/train_baseline.py results/baseline/*.ll --mode hackable --timesteps 50000 --run-name hackable_50k
-uv run python scripts/train_baseline.py results/baseline/*.ll --mode secure --timesteps 50000 --run-name secure_50k
+python scripts/train_hrl.py --world_model path/to/model.pth --meta_calibrator path/to/calibrator.pth
 ```
 
-### Resume Training from Checkpoint
+### Evaluation
 
 ```bash
-uv run python scripts/train_baseline.py results/baseline/*.ll --mode hackable --timesteps 50000 --resume models/ppo_hackable.zip --run-name hackable_100k
+python scripts/eval_vs_o3.py --agent path/to/agent.pth
 ```
 
-### Evaluate a Trained Model
+## Dataset
 
-```bash
-uv run python scripts/train_baseline.py results/baseline/*.ll --mode hackable --eval-only models/ppo_hackable.zip --run-name hackable_eval
-```
-
-### Analyze Pass Sequences
-
-```bash
-uv run python scripts/analyze_passes.py --eval logs/hackable_50k_eval.json
-uv run python scripts/analyze_passes.py --compare-hackable logs/hackable_50k_eval.json --compare-secure logs/secure_50k_eval.json
-```
-
-## Reward Modes
-
-| Mode | Description |
-|------|-------------|
-| `hackable` | Naive reward based only on instruction reduction |
-| `secure` | Penalizes size increase, compile time, and pass repetition |
-
-## Experimental Results (50k timesteps)
-
-| Metric | HACKABLE | SECURE | Winner |
-|--------|----------|--------|--------|
-| Instruction Reduction | 17.0% | 19.7% | SECURE |
-| Size Increase | 3.1% | 0.9% | SECURE |
-| Pass Diversity | 0.13 | 0.17 | SECURE |
-| Episode Reward | 0.19 | -1.38 | HACKABLE |
-
-The HACKABLE agent gets higher rewards but worse actual optimization, demonstrating reward hacking.
-
-## PolyBench/C 4.2 Baseline Results
-
-### Datamining
-
-| Benchmark | Level | Instr | Size (B) | Time (ms) | Reduct % |
-|-----------|-------|-------|----------|-----------|----------|
-| correlation | -O0 | 530 | 2811 | 0.00 | 0.0 |
-| | -O1 | 407 | 3523 | 102.65 | 23.2 |
-| | -O2 | 376 | 3525 | 87.54 | 29.1 |
-| | -O3 | 512 | 4419 | 82.65 | 3.4 |
-| | -Os | 376 | 3525 | 70.38 | 29.1 |
-| covariance | -O0 | 387 | 2305 | 0.00 | 0.0 |
-| | -O1 | 330 | 2683 | 69.00 | 14.7 |
-| | -O2 | 338 | 2851 | 69.92 | 12.7 |
-| | -O3 | 421 | 3293 | 90.06 | -8.8 |
-| | -Os | 338 | 2851 | 66.60 | 12.7 |
-
-### Linear Algebra
-
-| Benchmark | Level | Instr | Size (B) | Time (ms) | Reduct % |
-|-----------|-------|-------|----------|-----------|----------|
-| 2mm | -O0 | 583 | 2811 | 0.00 | 0.0 |
-| | -O1 | 439 | 3553 | 67.38 | 24.7 |
-| | -O2 | 425 | 3505 | 83.18 | 27.1 |
-| | -O3 | 476 | 3757 | 79.35 | 18.4 |
-| | -Os | 425 | 3505 | 93.04 | 27.1 |
-| 3mm | -O0 | 697 | 3113 | 0.00 | 0.0 |
-| | -O1 | 514 | 3912 | 76.22 | 26.3 |
-| | -O2 | 496 | 3880 | 73.03 | 28.8 |
-| | -O3 | 515 | 4200 | 125.35 | 26.1 |
-| | -Os | 496 | 3880 | 85.14 | 28.8 |
-| atax | -O0 | 303 | 2135 | 0.00 | 0.0 |
-| | -O1 | 275 | 2502 | 63.58 | 9.2 |
-| | -O2 | 272 | 2798 | 75.88 | 10.2 |
-| | -O3 | 272 | 2872 | 72.07 | 10.2 |
-| | -Os | 272 | 2798 | 69.93 | 10.2 |
-| bicg | -O0 | 329 | 2154 | 0.00 | 0.0 |
-| | -O1 | 263 | 2517 | 61.25 | 20.1 |
-| | -O2 | 203 | 2461 | 57.58 | 38.3 |
-| | -O3 | 207 | 2527 | 58.24 | 37.1 |
-| | -Os | 203 | 2461 | 56.97 | 38.3 |
-| cholesky | -O0 | 493 | 2613 | 0.00 | 0.0 |
-| | -O1 | 436 | 3289 | 70.01 | 11.6 |
-| | -O2 | 407 | 3203 | 74.08 | 17.4 |
-| | -O3 | 351 | 2899 | 68.96 | 28.8 |
-| | -Os | 407 | 3203 | 72.60 | 17.4 |
-| doitgen | -O0 | 385 | 2236 | 0.00 | 0.0 |
-| | -O1 | 288 | 2827 | 62.29 | 25.2 |
-| | -O2 | 307 | 2971 | 70.02 | 20.3 |
-| | -O3 | 304 | 2939 | 92.16 | 21.0 |
-| | -Os | 307 | 2971 | 83.21 | 20.3 |
-| durbin | -O0 | 247 | 2056 | 0.00 | 0.0 |
-| | -O1 | 229 | 2500 | 78.88 | 7.3 |
-| | -O2 | 213 | 2588 | 74.31 | 13.8 |
-| | -O3 | 213 | 2588 | 63.68 | 13.8 |
-| | -Os | 213 | 2588 | 77.12 | 13.8 |
-| gemm | -O0 | 284 | 2018 | 0.00 | 0.0 |
-| | -O1 | 155 | 2071 | 59.33 | 45.4 |
-| | -O2 | 182 | 2343 | 52.89 | 35.9 |
-| | -O3 | 182 | 2343 | 64.33 | 35.9 |
-| | -Os | 182 | 2343 | 59.02 | 35.9 |
-| gemver | -O0 | 562 | 3012 | 0.00 | 0.0 |
-| | -O1 | 365 | 3351 | 82.38 | 35.1 |
-| | -O2 | 443 | 3895 | 88.98 | 21.2 |
-| | -O3 | 443 | 3911 | 93.54 | 21.2 |
-| | -Os | 443 | 3895 | 103.39 | 21.2 |
-| gesummv | -O0 | 338 | 2259 | 0.00 | 0.0 |
-| | -O1 | 118 | 1980 | 62.79 | 65.1 |
-| | -O2 | 111 | 1964 | 63.17 | 67.2 |
-| | -O3 | 111 | 1964 | 59.13 | 67.2 |
-| | -Os | 111 | 1964 | 72.68 | 67.2 |
-| gramschmidt | -O0 | 393 | 2346 | 0.00 | 0.0 |
-| | -O1 | 330 | 2912 | 68.73 | 16.0 |
-| | -O2 | 414 | 3512 | 74.87 | -5.3 |
-| | -O3 | 414 | 3528 | 72.62 | -5.3 |
-| | -Os | 414 | 3512 | 77.96 | -5.3 |
-| lu | -O0 | 488 | 2487 | 0.00 | 0.0 |
-| | -O1 | 433 | 3379 | 73.47 | 11.3 |
-| | -O2 | 416 | 3357 | 73.89 | 14.8 |
-| | -O3 | 358 | 3037 | 78.36 | 26.6 |
-| | -Os | 416 | 3357 | 76.50 | 14.8 |
-| ludcmp | -O0 | 734 | 3289 | 0.00 | 0.0 |
-| | -O1 | 617 | 4216 | 97.57 | 15.9 |
-| | -O2 | 624 | 4478 | 88.93 | 15.0 |
-| | -O3 | 566 | 4158 | 91.51 | 22.9 |
-| | -Os | 624 | 4478 | 89.98 | 15.0 |
-| mvt | -O0 | 333 | 2234 | 0.00 | 0.0 |
-| | -O1 | 234 | 2468 | 63.63 | 29.7 |
-| | -O2 | 210 | 2392 | 117.56 | 36.9 |
-| | -O3 | 210 | 2408 | 94.38 | 36.9 |
-| | -Os | 210 | 2392 | 82.26 | 36.9 |
-| symm | -O0 | 428 | 2523 | 0.00 | 0.0 |
-| | -O1 | 257 | 2655 | 88.24 | 40.0 |
-| | -O2 | 265 | 3263 | 141.96 | 38.1 |
-| | -O3 | 366 | 4021 | 119.84 | 14.5 |
-| | -Os | 265 | 3263 | 124.17 | 38.1 |
-| syr2k | -O0 | 388 | 2307 | 0.00 | 0.0 |
-| | -O1 | 234 | 2328 | 142.68 | 39.7 |
-| | -O2 | 280 | 2708 | 143.33 | 27.8 |
-| | -O3 | 325 | 2900 | 187.72 | 16.2 |
-| | -Os | 280 | 2708 | 120.00 | 27.8 |
-| syrk | -O0 | 320 | 2111 | 0.00 | 0.0 |
-| | -O1 | 272 | 2529 | 116.57 | 15.0 |
-| | -O2 | 309 | 2941 | 166.23 | 3.4 |
-| | -O3 | 356 | 3117 | 97.54 | -11.2 |
-| | -Os | 309 | 2941 | 190.27 | 3.4 |
-| trisolv | -O0 | 242 | 1904 | 0.00 | 0.0 |
-| | -O1 | 160 | 1998 | 79.20 | 33.9 |
-| | -O2 | 154 | 2126 | 86.54 | 36.4 |
-| | -O3 | 154 | 2126 | 74.09 | 36.4 |
-| | -Os | 154 | 2126 | 92.02 | 36.4 |
-| trmm | -O0 | 324 | 2108 | 0.00 | 0.0 |
-| | -O1 | 247 | 2684 | 111.98 | 23.8 |
-| | -O2 | 238 | 2668 | 118.75 | 26.5 |
-| | -O3 | 335 | 3222 | 127.36 | -3.4 |
-| | -Os | 238 | 2668 | 104.89 | 26.5 |
-
-### Medley
-
-| Benchmark | Level | Instr | Size (B) | Time (ms) | Reduct % |
-|-----------|-------|-------|----------|-----------|----------|
-| deriche | -O0 | 735 | 4125 | 0.00 | 0.0 |
-| | -O1 | 538 | 4442 | 88.74 | 26.8 |
-| | -O2 | 590 | 4852 | 122.01 | 19.7 |
-| | -O3 | 580 | 4932 | 136.31 | 21.1 |
-| | -Os | 590 | 4852 | 135.37 | 19.7 |
-| floyd-warshall | -O0 | 259 | 1965 | 0.00 | 0.0 |
-| | -O1 | 125 | 1951 | 67.87 | 51.7 |
-| | -O2 | 210 | 3439 | 79.04 | 18.9 |
-| | -O3 | 210 | 3439 | 91.19 | 18.9 |
-| | -Os | 210 | 3439 | 81.96 | 18.9 |
-| nussinov | -O0 | 570 | 2483 | 0.00 | 0.0 |
-| | -O1 | 209 | 2307 | 83.98 | 63.3 |
-| | -O2 | 222 | 3259 | 80.20 | 61.1 |
-| | -O3 | 167 | 2955 | 69.98 | 70.7 |
-| | -Os | 222 | 3259 | 91.18 | 61.1 |
-
-### Stencils
-
-| Benchmark | Level | Instr | Size (B) | Time (ms) | Reduct % |
-|-----------|-------|-------|----------|-----------|----------|
-| adi | -O0 | 704 | 3092 | 0.00 | 0.0 |
-| | -O1 | 336 | 3731 | 97.06 | 52.3 |
-| | -O2 | 303 | 3639 | 155.54 | 57.0 |
-| | -O3 | 303 | 3639 | 94.27 | 57.0 |
-| | -Os | 303 | 3639 | 86.15 | 57.0 |
-| fdtd-2d | -O0 | 537 | 2583 | 0.00 | 0.0 |
-| | -O1 | 395 | 3247 | 85.45 | 26.4 |
-| | -O2 | 586 | 5083 | 91.41 | -9.1 |
-| | -O3 | 578 | 5163 | 115.67 | -7.6 |
-| | -Os | 586 | 5083 | 111.54 | -9.1 |
-| heat-3d | -O0 | 659 | 2462 | 0.00 | 0.0 |
-| | -O1 | 248 | 2884 | 78.98 | 62.4 |
-| | -O2 | 525 | 5694 | 111.44 | 20.3 |
-| | -O3 | 525 | 5694 | 119.91 | 20.3 |
-| | -Os | 525 | 5694 | 183.77 | 20.3 |
-| jacobi-1d | -O0 | 214 | 1888 | 0.00 | 0.0 |
-| | -O1 | 205 | 1998 | 176.05 | 4.2 |
-| | -O2 | 325 | 2678 | 190.41 | -51.9 |
-| | -O3 | 323 | 2694 | 290.08 | -50.9 |
-| | -Os | 325 | 2678 | 136.36 | -51.9 |
-| jacobi-2d | -O0 | 370 | 2159 | 0.00 | 0.0 |
-| | -O1 | 248 | 2462 | 253.16 | 33.0 |
-| | -O2 | 447 | 3940 | 248.55 | -20.8 |
-| | -O3 | 447 | 3940 | 228.61 | -20.8 |
-| | -Os | 447 | 3940 | 131.02 | -20.8 |
-| seidel-2d | -O0 | 277 | 1876 | 0.00 | 0.0 |
-| | -O1 | 145 | 1969 | 97.50 | 47.7 |
-| | -O2 | 138 | 2123 | 89.06 | 50.2 |
-| | -O3 | 139 | 2087 | 102.52 | 49.8 |
-| | -Os | 138 | 2123 | 83.35 | 50.2 |
+The training data includes 60,000+ optimization sequences collected from PolyBench, MiBench, and synthetic benchmark suites.

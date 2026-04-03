@@ -1,8 +1,10 @@
+
 import numpy as np
+import torch
 from pathlib import Path
 from typing import Union
 
-from .ir_parser import IRParser, IRStats
+from .ir_parser import IRParser
 from ..config import FEATURE_DIM
 
 
@@ -13,103 +15,78 @@ TOP_INSTRUCTIONS = [
     'phi', 'sext', 'zext', 'trunc'
 ]
 
-MAX_FUNCTIONS = 100
-MAX_BLOCKS = 1000
-MAX_INSTRUCTIONS = 10000
-MAX_LOOPS = 50
-MAX_CALLS = 500
-
 
 def normalize(value: float, max_val: float) -> float:
     return min(value / max_val, 1.0)
 
 
-def extract_features(ir_path: Union[str, Path]) -> np.ndarray:
+def extract_scalar_features(ir_path: Union[str, Path]) -> np.ndarray:
+    """Extract the scalar (non-GNN) features from an IR file.
+    These are combined with the GNN embedding by the canonical encoder."""
     parser = IRParser(str(ir_path))
     stats = parser.parse()
     ratios = parser.get_instruction_ratios()
     
-    features = np.zeros(FEATURE_DIM, dtype=np.float32)
-    idx = 0
+    scalar_features = []
     
-    features[idx] = ratios['pct_arithmetic']; idx += 1
-    features[idx] = ratios['pct_memory']; idx += 1
-    features[idx] = ratios['pct_control']; idx += 1
-    features[idx] = ratios['pct_comparison']; idx += 1
-    features[idx] = ratios['pct_other']; idx += 1
+    scalar_features.append(ratios['pct_arithmetic'])
+    scalar_features.append(ratios['pct_memory'])
+    scalar_features.append(ratios['pct_control'])
+    scalar_features.append(ratios['pct_comparison'])
+    scalar_features.append(ratios['pct_other'])
     
     total_instr = max(stats.num_instructions, 1)
     for instr in TOP_INSTRUCTIONS:
         count = stats.instruction_counts.get(instr, 0)
-        features[idx] = count / total_instr
-        idx += 1
+        scalar_features.append(count / total_instr)
     
-    features[idx] = normalize(stats.num_functions, MAX_FUNCTIONS); idx += 1
-    features[idx] = normalize(stats.num_basic_blocks, MAX_BLOCKS); idx += 1
-    features[idx] = normalize(stats.num_instructions, MAX_INSTRUCTIONS); idx += 1
-    features[idx] = normalize(stats.num_loops, MAX_LOOPS); idx += 1
+    scalar_features.append(normalize(stats.num_functions, 100))
+    scalar_features.append(normalize(stats.num_basic_blocks, 1000))
+    scalar_features.append(normalize(stats.num_instructions, 10000))
+    scalar_features.append(normalize(stats.num_loops, 50))
+    scalar_features.append(normalize(stats.max_loop_depth, 5))
+    scalar_features.append(normalize(stats.num_edges / max(stats.num_basic_blocks, 1), 3.0))
+    scalar_features.append(normalize(stats.cyclomatic_complexity, 100))
     
     if stats.num_basic_blocks > 0:
-        features[idx] = normalize(stats.num_instructions / stats.num_basic_blocks, 50)
-    idx += 1
-    
+        scalar_features.append(normalize(stats.num_instructions / stats.num_basic_blocks, 50))
+    else:
+        scalar_features.append(0.0)
+        
     if stats.num_functions > 0:
-        features[idx] = normalize(stats.num_calls / stats.num_functions, 20)
-    idx += 1
-    
-    if stats.num_functions > 0:
-        features[idx] = normalize(stats.num_basic_blocks / stats.num_functions, 100)
-    idx += 1
-    
+        scalar_features.append(normalize(stats.num_calls / stats.num_functions, 20))
+    else:
+        scalar_features.append(0.0)
+        
     if stats.num_instructions > 0:
-        features[idx] = normalize(stats.num_branches / stats.num_instructions, 0.5)
-    idx += 1
-    
-    return features
+        scalar_features.append(normalize(stats.num_branches / stats.num_instructions, 0.5))
+    else:
+        scalar_features.append(0.0)
+        
+    return np.array(scalar_features, dtype=np.float32)
 
 
-def compare_features(ir_path1: str, ir_path2: str) -> dict:
-    f1 = extract_features(ir_path1)
-    f2 = extract_features(ir_path2)
+# LEGACY COMPATIBILITY: For scripts that still call extract_features()
+# This returns a flat 128-dim vector by zero-padding the scalar features.
+# New code should use extract_ir_graph() + GNNEncoder for the full pipeline.
+def extract_features(ir_path: Union[str, Path]) -> np.ndarray:
+    """Legacy compatibility wrapper. Returns 128-dim flat vector.
+    For new code, use the canonical pipeline: extract_ir_graph() -> GNNEncoder."""
+    scalar_vec = extract_scalar_features(ir_path)
     
-    diff = f2 - f1
-    l2_distance = np.linalg.norm(diff)
-    
-    return {
-        'features_before': f1,
-        'features_after': f2,
-        'difference': diff,
-        'l2_distance': l2_distance,
-        'num_changed': np.sum(np.abs(diff) > 0.001),
-    }
+    # Pad to FEATURE_DIM (no more frozen random GNN projection)
+    if len(scalar_vec) > FEATURE_DIM:
+        return scalar_vec[:FEATURE_DIM]
+    elif len(scalar_vec) < FEATURE_DIM:
+        padding = np.zeros(FEATURE_DIM - len(scalar_vec), dtype=np.float32)
+        return np.concatenate([scalar_vec, padding])
+    return scalar_vec
 
 
 if __name__ == "__main__":
     import sys
-    
     if len(sys.argv) < 2:
-        print("Usage: python feature_vector.py <ir_file.ll> [ir_file2.ll]")
         sys.exit(1)
-    
     features = extract_features(sys.argv[1])
-    
-    print(f"\n=== Feature Vector for {sys.argv[1]} ===")
-    print(f"Shape: {features.shape}")
-    print(f"Non-zero features: {np.sum(features != 0)}")
-    print(f"Min: {features.min():.4f}, Max: {features.max():.4f}")
-    
-    print(f"\n=== First 28 features (named) ===")
-    names = (
-        ['pct_arithmetic', 'pct_memory', 'pct_control', 'pct_comparison', 'pct_other']
-        + [f'freq_{instr}' for instr in TOP_INSTRUCTIONS]
-        + ['norm_functions', 'norm_blocks', 'norm_instructions', 'norm_loops']
-        + ['instr_per_block', 'calls_per_func', 'blocks_per_func', 'branch_density']
-    )
-    for i, name in enumerate(names):
-        print(f"  [{i:2d}] {name:20s} = {features[i]:.4f}")
-    
-    if len(sys.argv) >= 3:
-        print(f"\n=== Comparing with {sys.argv[2]} ===")
-        comparison = compare_features(sys.argv[1], sys.argv[2])
-        print(f"L2 distance: {comparison['l2_distance']:.4f}")
-        print(f"Features changed: {comparison['num_changed']}")
+    print(f"[AGENT] Extracted Scalar Features: {features.shape}...")
+    print(f"[AGENT] Non-zero elements: {np.sum(features != 0)}...")
