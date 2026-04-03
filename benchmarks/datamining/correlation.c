@@ -18,7 +18,7 @@ void init_array(int m, int n, double data[m][n]) {
     }
 }
 
-void correlation(int m, int n, double data[m][n], double mean[m], double stddev[m], double symmat[m][m]) {
+__attribute__((noinline)) void correlation(int m, int n, double data[m][n], double mean[m], double stddev[m], double symmat[m][m]) {
     double eps = 0.1;
 
     for (int j = 0; j < m; j++) {
@@ -74,8 +74,9 @@ int main() {
     correlation(m, n, data, mean, stddev, symmat);
     clock_t end = clock();
 
+    volatile double check = symmat[0][0];
     printf("Correlation Execution Time: %f s\n", (double)(end - start) / CLOCKS_PER_SEC);
-    printf("Result check: %f\n", symmat[0][0]);
+    printf("Result check: %f\n", (double)check);
 
     free(data);
     free(mean);

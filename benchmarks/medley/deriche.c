@@ -17,7 +17,7 @@ void init_array(int w, int h, double *alpha, double imgIn[w][h]) {
             imgIn[i][j] = (double)((313 * i + 991 * j) % 65536) / 65535.0;
 }
 
-void deriche(int w, int h, double alpha,
+__attribute__((noinline)) void deriche(int w, int h, double alpha,
              double imgIn[w][h], double imgOut[w][h],
              double y1[w][h], double y2[w][h]) {
     double k;

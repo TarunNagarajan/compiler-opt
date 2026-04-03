@@ -1,71 +1,47 @@
-# PolyBench/C 4.2 Benchmark Suite
+# Compiler Optimization Benchmark Suite
 
-This directory contains the complete **PolyBench/C 4.2** benchmark suite (30 kernels) organized for compiler optimization research.
+This directory contains a diverse collection of benchmarks used for training and evaluating reinforcement learning agents for compiler optimization. The suite includes numerical kernels, synthetic code patterns, and real-world algorithms.
 
-## Categories
+## Benchmark Categories
 
-| Category | Benchmarks | Description |
-|----------|------------|-------------|
-| **datamining** | 2 | Statistical computations (correlation, covariance) |
-| **linear-algebra** | 20 | BLAS-like kernels and solvers |
-| **medley** | 3 | Miscellaneous algorithms (edge detection, shortest path, RNA) |
-| **stencils** | 5 | Iterative stencil computations |
+| Category | Description |
+|----------|-------------|
+| **PolyBench/C 4.2** | 30 numerical kernels (linear algebra, datamining, stencils, medley). |
+| **MiBench** | Real-world embedded benchmarks (network, security, automotive, etc.). |
+| **Synthetic** | Procedurally generated code patterns to stress-test specific optimizations. |
+| **Diverse Synthetic** | Larger, more complex synthetic modules with varying control-flow density. |
+| **Large Scale** | Industrial-sized modules for evaluating foveated perception and scaling. |
+| **Adversarial** | Hand-crafted cases designed to trigger optimization regressions or edge cases. |
+| **Graphs** | Benchmarks focused on pointer-heavy graph traversal and manipulation. |
 
-## Benchmark List
+## PolyBench/C 4.2 (Numerical Kernels)
 
-### Datamining
-- `correlation.c` - Correlation computation
-- `covariance.c` - Covariance computation
+- **datamining**: correlation, covariance
+- **linear-algebra**: 2mm, 3mm, atax, bicg, cholesky, doitgen, durbin, gemm, gemver, gesummv, gramschmidt, lu, ludcmp, mvt, symm, syr2k, syrk, trisolv, trmm
+- **medley**: deriche, floyd-warshall, nussinov
+- **stencils**: adi, fdtd-2d, heat-3d, jacobi-1d, jacobi-2d, seidel-2d
 
-### Linear-Algebra
-- `2mm.c` - 2 matrix multiplications (D=α·A·B·C+β·D)
-- `3mm.c` - 3 matrix multiplications
-- `atax.c` - Matrix transpose and vector mult
-- `bicg.c` - BiCG sub kernel
-- `cholesky.c` - Cholesky decomposition
-- `doitgen.c` - Multi-resolution analysis kernel
-- `durbin.c` - Toeplitz system solver
-- `gemm.c` - Matrix multiplication
-- `gemver.c` - Vector mult and matrix addition
-- `gesummv.c` - Scalar, vector, matrix mult
-- `gramschmidt.c` - Gram-Schmidt orthogonalization
-- `lu.c` - LU decomposition
-- `ludcmp.c` - LU decomposition with forward/back substitution
-- `mvt.c` - Matrix vector product and transpose
-- `symm.c` - Symmetric matrix multiplication
-- `syr2k.c` - Symmetric rank-2k update
-- `syrk.c` - Symmetric rank-k update
-- `trisolv.c` - Triangular solver
-- `trmm.c` - Triangular matrix multiplication
+## Advanced & Synthetic Suites
 
-### Medley
-- `deriche.c` - Deriche edge detection filter
-- `floyd-warshall.c` - All-pairs shortest path
-- `nussinov.c` - RNA secondary structure prediction
-
-### Stencils
-- `adi.c` - Alternating Direction Implicit solver
-- `fdtd-2d.c` - 2D Finite Difference Time Domain
-- `heat-3d.c` - 3D heat equation
-- `jacobi-1d.c` - 1D Jacobi stencil
-- `jacobi-2d.c` - 2D Jacobi stencil
-- `seidel-2d.c` - 2D Gauss-Seidel stencil
+- **diverse_synthetic**: Focuses on deep loop nesting and complex conditional branching.
+- **large_scale**: Includes modules with 1000+ basic blocks to evaluate GNN scalability.
+- **mibench**: Subset of the MiBench suite including `bitcount`, `qsort`, and `sha`.
+- **adversarial**: Specifically targets "O2-regressions" like `jacobi-1d` where standard flags increase code size.
 
 ## Usage
 
-Compile to LLVM IR:
+### Compile to LLVM IR
+All benchmarks should be compiled with `-O0` and `-Xclang -disable-O0-optnone` to produce a clean baseline for the RL agent.
+
 ```bash
 clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone benchmarks/linear-algebra/gemm.c -o gemm.ll
 ```
 
-Run baseline report:
+### Batch Processing
+Use the provided script to generate IR for all registered benchmarks:
 ```bash
 python scripts/run_baseline_report.py
 ```
 
-## Dataset Sizes
-
-Array sizes are configurable via preprocessor macros (default: 128-512). Example:
-```bash
-clang -DN=1024 -S -emit-llvm ...
-```
+## Dataset Configuration
+The dataset used for training the World Model and HRL agents consists of 60,000+ optimization sequences collected across these suites.
