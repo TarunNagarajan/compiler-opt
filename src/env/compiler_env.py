@@ -40,6 +40,12 @@ class CompilerOptEnv(gym.Env):
         max_steps: int = 10,
         reward_mode: RewardMode = RewardMode.HACKABLE,
         collect_speed_metrics: bool = False,
+        runtime_measure_runs: int = 3,
+        runtime_measure_loop_count: int = 100,
+        runtime_measure_timeout_seconds: float = 20.0,
+        runtime_measure_aggregation: str = "median",
+        runtime_target_rel_ci95_pct: float = 2.5,
+        runtime_max_measure_runs: int = 5,
         render_mode: Optional[str] = None
     ):
         super().__init__()
@@ -51,6 +57,12 @@ class CompilerOptEnv(gym.Env):
         self.max_steps = max_steps
         self.reward_mode = reward_mode
         self.collect_speed_metrics = collect_speed_metrics
+        self.runtime_measure_runs = max(1, int(runtime_measure_runs))
+        self.runtime_measure_loop_count = max(1, int(runtime_measure_loop_count))
+        self.runtime_measure_timeout_seconds = max(1.0, float(runtime_measure_timeout_seconds))
+        self.runtime_measure_aggregation = str(runtime_measure_aggregation).strip().lower()
+        self.runtime_target_rel_ci95_pct = max(0.1, float(runtime_target_rel_ci95_pct))
+        self.runtime_max_measure_runs = max(self.runtime_measure_runs, int(runtime_max_measure_runs))
         self.render_mode = render_mode
         
         self.num_atomic_passes = len(LLVM_PASSES)
@@ -255,8 +267,16 @@ class CompilerOptEnv(gym.Env):
         self.o3_instr = 0
         self.o3_energy = 0.0
         if measure_speed_metrics:
-            initial_runtime = self.metrics.measure_runtime(self.current_ir_path)
-            
+            initial_runtime = self.metrics.measure_runtime(
+                self.current_ir_path,
+                iterations=self.runtime_measure_runs,
+                loop_count=self.runtime_measure_loop_count,
+                timeout_seconds=self.runtime_measure_timeout_seconds,
+                aggregation=self.runtime_measure_aggregation,
+                max_iterations=self.runtime_max_measure_runs,
+                target_rel_ci95_pct=self.runtime_target_rel_ci95_pct,
+            )
+            initial_runtime_stats = self.metrics.get_last_runtime_stats()
             # --- O3 BASELINE: Measure the target to beat ---
             from ..config import CLANG, CLANG_CXX
             import subprocess
@@ -270,14 +290,27 @@ class CompilerOptEnv(gym.Env):
             cmd = [str(baseline_compiler), "-O3", "-S", "-emit-llvm", str(source_path), "-o", str(temp_o3_ir), "-Wno-everything"]
             subprocess.run(cmd, capture_output=True)
             if temp_o3_ir.exists():
-                self.o3_runtime = self.metrics.measure_runtime(str(temp_o3_ir))
+                self.o3_runtime = self.metrics.measure_runtime(
+                    str(temp_o3_ir),
+                    iterations=self.runtime_measure_runs,
+                    loop_count=self.runtime_measure_loop_count,
+                    timeout_seconds=self.runtime_measure_timeout_seconds,
+                    aggregation=self.runtime_measure_aggregation,
+                    max_iterations=self.runtime_max_measure_runs,
+                    target_rel_ci95_pct=self.runtime_target_rel_ci95_pct,
+                )
+                self.o3_runtime_stats = self.metrics.get_last_runtime_stats()
                 self.o3_instr = self.metrics.count_instructions(str(temp_o3_ir))
                 self.o3_energy = self.metrics.measure_energy(str(temp_o3_ir), runtime_cycles=self.o3_runtime)
             else:
                 # Do not fabricate O3 numbers; leave as unknown when baseline build fails.
                 self.o3_runtime = 0.0
+                self.o3_runtime_stats = self.metrics.get_last_runtime_stats()
                 self.o3_instr = 0
                 self.o3_energy = 0.0
+        else:
+            initial_runtime_stats = self.metrics.get_last_runtime_stats()
+            self.o3_runtime_stats = self.metrics.get_last_runtime_stats()
         
         try:
             initial_parser = IRParser(self.current_ir_path)
@@ -323,6 +356,7 @@ class CompilerOptEnv(gym.Env):
             self.initial_energy = 0.0
         self.prev_size = initial_size
         self.prev_runtime = initial_runtime
+        self.prev_runtime_stats = dict(initial_runtime_stats)
         self.prev_energy = self.initial_energy
         self.last_graph_data = None # Cache for world model
         
@@ -349,6 +383,13 @@ class CompilerOptEnv(gym.Env):
             "o3_runtime": self.o3_runtime,
             "o3_energy": getattr(self, 'o3_energy', 0.0),
             "o3_instructions": self.o3_instr,
+            "runtime_measure_runs": self.runtime_measure_runs,
+            "runtime_measure_loop_count": self.runtime_measure_loop_count,
+            "runtime_measure_timeout_seconds": self.runtime_measure_timeout_seconds,
+            "runtime_measure_aggregation": self.runtime_measure_aggregation,
+            "runtime_target_rel_ci95_pct": self.runtime_target_rel_ci95_pct,
+            "runtime_max_measure_runs": self.runtime_max_measure_runs,
+            "runtime_initial_rel_ci95_pct": float(self.prev_runtime_stats.get('relative_ci95_pct', 100.0)),
             "reward_mode": self.reward_mode.value
         }
         
@@ -443,9 +484,32 @@ class CompilerOptEnv(gym.Env):
         # Performance optimization: skip heavy runtime measurement when not requested.
         new_runtime = 0.0
         new_energy = 0.0
+        runtime_before_stats = dict(getattr(self, 'prev_runtime_stats', {}))
+        new_runtime_stats = self.metrics.get_last_runtime_stats()
         if measure_speed_metrics:
-            new_runtime = self.metrics.measure_runtime(self.current_ir_path)
+            new_runtime = self.metrics.measure_runtime(
+                self.current_ir_path,
+                iterations=self.runtime_measure_runs,
+                loop_count=self.runtime_measure_loop_count,
+                timeout_seconds=self.runtime_measure_timeout_seconds,
+                aggregation=self.runtime_measure_aggregation,
+                max_iterations=self.runtime_max_measure_runs,
+                target_rel_ci95_pct=self.runtime_target_rel_ci95_pct,
+            )
+            new_runtime_stats = self.metrics.get_last_runtime_stats()
             new_energy = self.metrics.measure_energy(self.current_ir_path, runtime_cycles=new_runtime)
+
+        runtime_gain_raw_pct = 0.0
+        runtime_gain_noise_floor_pct = 0.0
+        runtime_gain_denoised_pct = 0.0
+        runtime_gain_significant = False
+        runtime_confidence = 0.0
+        if runtime_before > 0 and new_runtime > 0:
+            runtime_gain_raw_pct = (runtime_before - new_runtime) / max(runtime_before, 1e-6) * 100.0
+            runtime_gain_noise_floor_pct = float(runtime_before_stats.get('relative_ci95_pct', 100.0)) + float(new_runtime_stats.get('relative_ci95_pct', 100.0))
+            runtime_gain_significant = abs(runtime_gain_raw_pct) > runtime_gain_noise_floor_pct
+            runtime_gain_denoised_pct = np.sign(runtime_gain_raw_pct) * max(0.0, abs(runtime_gain_raw_pct) - runtime_gain_noise_floor_pct)
+            runtime_confidence = min(1.0, abs(runtime_gain_raw_pct) / max(abs(runtime_gain_raw_pct) + runtime_gain_noise_floor_pct, 1e-6))
         
         try:
             new_parser = IRParser(self.current_ir_path)
@@ -482,7 +546,7 @@ class CompilerOptEnv(gym.Env):
             # We want to encourage making the code faster than it was BEFORE this action
             # Positive = action improved runtime, Negative = action made it slower
             if runtime_before > 0 and new_runtime > 0:
-                reward = (runtime_before - new_runtime) / max(runtime_before, 1e-6)
+                reward = runtime_gain_denoised_pct / 100.0
             else:
                 reward = 0.0
 
@@ -517,6 +581,7 @@ class CompilerOptEnv(gym.Env):
             
         self.prev_size = new_size
         self.prev_runtime = new_runtime
+        self.prev_runtime_stats = dict(new_runtime_stats)
         self.prev_energy = new_energy
         
         terminated = self.current_step >= self.max_steps
@@ -546,6 +611,17 @@ class CompilerOptEnv(gym.Env):
             "branches_after": new_branches,
             "runtime_before": runtime_before,
             "runtime_after": new_runtime,
+            "runtime_before_rel_ci95_pct": float(runtime_before_stats.get('relative_ci95_pct', 100.0)),
+            "runtime_after_rel_ci95_pct": float(new_runtime_stats.get('relative_ci95_pct', 100.0)),
+            "runtime_before_cv_pct": float(runtime_before_stats.get('cv_pct', 100.0)),
+            "runtime_after_cv_pct": float(new_runtime_stats.get('cv_pct', 100.0)),
+            "runtime_before_samples": int(runtime_before_stats.get('sample_count', 0)),
+            "runtime_after_samples": int(new_runtime_stats.get('sample_count', 0)),
+            "runtime_gain_raw_pct": runtime_gain_raw_pct,
+            "runtime_gain_noise_floor_pct": runtime_gain_noise_floor_pct,
+            "runtime_gain_denoised_pct": runtime_gain_denoised_pct,
+            "runtime_gain_significant": bool(runtime_gain_significant),
+            "runtime_confidence": float(runtime_confidence),
             "energy_before": prev_energy,
             "energy_after": new_energy,
             "size_before": prev_size,

@@ -4,6 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
+from torch.utils.data import DataLoader as VanillaDataLoader
 import numpy as np
 import argparse
 from pathlib import Path
@@ -41,6 +42,55 @@ def to_scalar_tensor(value, default=100.0):
         arr = np.asarray(value, dtype=np.float32).reshape(-1)
         return torch.tensor([float(arr[0])], dtype=torch.float32) if arr.size > 0 else torch.tensor([default], dtype=torch.float32)
     return torch.tensor([float(value)], dtype=torch.float32)
+
+
+def quick_eval(model, env, device, num_samples=30):
+    """Lightweight inline eval: returns (mae, sensitivity)."""
+    model.eval()
+    errors = []
+    sensitivities = []
+    for _ in range(num_samples):
+        try:
+            obs, info = env.reset()
+            graph = env.get_observation_graph()
+            if graph is None:
+                continue
+            action = env.action_space.sample()
+            _, _, _, _, step_info = env.step(action)
+
+            true_delta = torch.tensor([[
+                (step_info['instructions_after'] - step_info['instructions_before']) / max(step_info['instructions_before'], 1) * 100.0,
+                (step_info['size_after'] - step_info['size_before']) / max(step_info['size_before'], 1) * 100.0,
+                (step_info.get('complexity_after', 0) - step_info.get('complexity_before', 0)) / max(step_info.get('complexity_before', 1), 1) * 100.0,
+                (step_info.get('loops_after', 0) - step_info.get('loops_before', 0)) / max(step_info.get('loops_before', 1), 1) * 100.0,
+                (step_info.get('calls_after', 0) - step_info.get('calls_before', 0)) / max(step_info.get('calls_before', 1), 1) * 100.0,
+                (step_info.get('blocks_after', 0) - step_info.get('blocks_before', 0)) / max(step_info.get('blocks_before', 1), 1) * 100.0
+            ]], dtype=torch.float32)
+
+            with torch.no_grad():
+                graph = graph.to(device)
+                state_emb = model.encode_graph(graph)
+                action_oh = torch.zeros(1, NUM_ACTIONS, device=device)
+                action_oh[0, action] = 1.0
+                num_nodes = graph.x.size(0) - 1
+                _, pred = model.transition_step(state_emb, action_oh, num_nodes=num_nodes)
+                pred_cpu = pred.cpu()
+
+                alt = random.randint(0, NUM_ACTIONS - 1)
+                while alt == action:
+                    alt = random.randint(0, NUM_ACTIONS - 1)
+                alt_oh = torch.zeros(1, NUM_ACTIONS, device=device)
+                alt_oh[0, alt] = 1.0
+                _, alt_pred = model.transition_step(state_emb, alt_oh, num_nodes=num_nodes)
+
+            errors.append(F.l1_loss(pred_cpu, true_delta).item())
+            sensitivities.append(abs(pred[0, 0].item() - alt_pred[0, 0].item()))
+        except Exception:
+            continue
+    model.train()
+    mae = np.mean(errors) if errors else 999.0
+    sens = np.mean(sensitivities) if sensitivities else 0.0
+    return mae, sens
 
 
 class TransitionDataV8(Data):
@@ -364,105 +414,141 @@ def train_correction_phase(model, diverse_env, industrial_env, args, device):
 
 def train_full_phase(model, diverse_env, industrial_env, args, device):
     """
-    PHASE 2: Full Fine-Tuning (optional polish)
-    
-    All parameters unfrozen at very low LR.
-    Correction already trained from Phase 1.
+    PHASE 2: Targeted Head Fine-Tuning (anti-overfit design)
+
+    Freezes GNN encoder, state_proj, action_gate, transition (~80% of params).
+    Only trains: metrics_head, size_proj, scale_correction, action_correction_emb.
+    Uses AdamW with weight_decay for regularization + CosineAnnealingLR.
     """
     print(f"\n{'='*60}")
-    print(f"[PHASE 2] Full Fine-Tuning")
+    print(f"[PHASE 2] Targeted Head Fine-Tuning (GNN frozen)")
     print(f"{'='*60}")
-    
+
+    # Freeze the expensive, already-trained components
+    frozen_parts = ('gnn_encoder', 'state_proj', 'action_gate', 'transition')
+    trainable_parts = ('scale_correction', 'size_proj', 'action_correction_emb', 'metrics_head')
+
+    for name, param in model.named_parameters():
+        param.requires_grad = any(part in name for part in trainable_parts)
+
+    total_count = sum(p.numel() for p in model.parameters())
+    frozen_count = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    trainable_count = total_count - frozen_count
+    print(f"[PHASE 2] Frozen: {frozen_count:,} params ({frozen_count/total_count*100:.1f}%)")
+    print(f"[PHASE 2] Trainable: {trainable_count:,} params ({trainable_count/total_count*100:.1f}%)")
+
     param_groups = [
-        {'params': model.gnn_encoder.parameters(),    'lr': 1e-5,  'name': 'gnn_encoder'},
         {'params': model.size_proj.parameters(),       'lr': 1e-4,  'name': 'size_proj'},
-        {'params': model.state_proj.parameters(),      'lr': 5e-4,  'name': 'state_proj'},
-        {'params': model.action_gate.parameters(),     'lr': 5e-4,  'name': 'action_gate'},
         {'params': model.metrics_head.parameters(),    'lr': 1e-4,  'name': 'metrics_head'},
-        {'params': model.transition.parameters(),      'lr': 5e-4,  'name': 'transition'},
-        {'params': model.scale_correction.parameters(),'lr': 5e-4,  'name': 'scale_correction'}
+        {'params': model.action_correction_emb.parameters(), 'lr': 3e-4, 'name': 'action_correction_emb'},
+        {'params': model.scale_correction.parameters(),'lr': 3e-4,  'name': 'scale_correction'},
     ]
-    optimizer = optim.Adam(param_groups)
-    
+    optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+    total_steps_estimate = args.iterations * args.epochs * max(args.steps_per_iter // args.batch_size, 1)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps_estimate, eta_min=1e-6)
+
     for pg in param_groups:
-        print(f"    {pg['name']:<20}: {pg['lr']}")
-    
+        print(f"    {pg['name']:<25}: {pg['lr']}")
+
     replay_buffer = []
     best_loss = float('inf')
     rng = random.Random(args.seed)
-    
+
     for it in range(args.iterations):
         print(f"\n--- Iteration {it+1}/{args.iterations} ---")
-        
+
         diverse_steps = int(args.steps_per_iter * 0.85)
         industrial_steps = args.steps_per_iter - diverse_steps
-        
+
+        # GNN is frozen → use Embed-Once (store_graphs=False, pre-computed state_emb)
         new_data = collect_transitions(
-            diverse_env, model, device, diverse_steps, include_noops=True, store_graphs=True, rng=rng
+            diverse_env, model, device, diverse_steps, include_noops=True, store_graphs=False, rng=rng
         )
         if industrial_env and industrial_steps > 0:
             print(f"    Collecting {industrial_steps} industrial transitions...")
             new_data.extend(
                 collect_transitions(
-                    industrial_env, model, device, industrial_steps, include_noops=True, store_graphs=True, rng=rng
+                    industrial_env, model, device, industrial_steps, include_noops=True, store_graphs=False, rng=rng
                 )
             )
-        
+
         replay_buffer.extend(new_data)
         if len(replay_buffer) > args.buffer_size:
             replay_buffer = replay_buffer[-args.buffer_size:]
         print(f"    Replay buffer: {len(replay_buffer)}")
-        
+
+        def _collate(batch):
+            return {
+                'state_emb': torch.stack([b.state_emb for b in batch]),
+                'action': torch.stack([b.action for b in batch]),
+                'y_metrics': torch.stack([b.y_metrics for b in batch]),
+                'total_nodes': torch.stack([b.total_nodes for b in batch]),
+                'num_nodes': torch.stack([b.num_nodes for b in batch]),
+            }
+
         dl_generator = torch.Generator().manual_seed(args.seed + it)
-        train_loader = DataLoader(replay_buffer, batch_size=args.batch_size, shuffle=True, generator=dl_generator)
+        train_loader = VanillaDataLoader(replay_buffer, batch_size=args.batch_size,
+                                         shuffle=True, collate_fn=_collate, generator=dl_generator)
         model.train()
         gc.collect()
-        
+
         epoch_pbar = tqdm(range(args.epochs), desc="  Training", unit="epoch")
         for epoch in epoch_pbar:
             total_loss = 0; n = 0
             for batch in train_loader:
-                batch = batch.to(device)
-                optimizer.zero_grad()
-                
-                actions_onehot = torch.zeros(batch.action.size(0), NUM_ACTIONS, device=device)
-                actions_onehot.scatter_(1, batch.action.view(-1, 1), 1.0)
-                
-                t_nodes = batch.total_nodes.view(-1, 1) if hasattr(batch, 'total_nodes') else torch.ones_like(batch.action).view(-1, 1) * 100.0
-                t_nodes = t_nodes.clamp(min=1.0)
-                weights = (1.0 + torch.log10(t_nodes / 100.0).clamp(min=0.0)).view(-1)
-                actual_abs = torch.abs(batch.y_metrics).sum(dim=-1).view(-1)
-                noop_mask = (actual_abs < 1e-3).float()
-                weights = weights * (1.0 + 1.0 * noop_mask)
-                y_true = batch.y_metrics
+                s_emb = batch['state_emb'].to(device)
+                if s_emb.dim() == 3 and s_emb.size(1) == 1:
+                    s_emb = s_emb.squeeze(1)
+                y_true = batch['y_metrics'].to(device)
                 if y_true.dim() == 3 and y_true.size(1) == 1:
                     y_true = y_true.squeeze(1)
-                
+                act_idx = batch['action'].to(device).view(-1)
+                t_nodes = batch['total_nodes'].to(device).view(-1, 1).clamp(min=1.0)
+                n_nodes = batch['num_nodes'].to(device).view(-1, 1).clamp(min=1.0)
+
+                optimizer.zero_grad()
+
+                actions_onehot = torch.zeros(s_emb.size(0), NUM_ACTIONS, device=device)
+                actions_onehot.scatter_(1, act_idx.view(-1, 1), 1.0)
+
+                weights = (1.0 + torch.log10(t_nodes / 100.0).clamp(min=0.0)).view(-1)
+                # Down-weight no-ops to prevent bias toward predicting zero
+                actual_abs = torch.abs(y_true).sum(dim=-1).view(-1)
+                noop_mask = (actual_abs < 1e-3).float()
+                weights = weights * (1.0 - 0.5 * noop_mask)
+
                 _, loss, _ = model(
-                    state_emb=None, action_onehot=actions_onehot,
-                    target_metrics=y_true, graph_data=batch,
-                    total_nodes=t_nodes, sample_weights=weights
+                    state_emb=s_emb, action_onehot=actions_onehot,
+                    target_metrics=y_true, graph_data=None,
+                    num_nodes=n_nodes, total_nodes=t_nodes, sample_weights=weights
                 )
-                
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
                 total_loss += loss.item(); n += 1
-            
+
             avg = total_loss / max(n, 1)
-            epoch_pbar.set_postfix(loss=f"{avg:.4f}")
-        
+            epoch_pbar.set_postfix(loss=f"{avg:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+
+        # Quick inline eval
+        eval_mae, eval_sens = quick_eval(model, diverse_env, device, num_samples=30)
+        print(f"    [EVAL] MAE={eval_mae:.4f}%, Sensitivity={eval_sens:.4f}")
+
         if avg < best_loss:
             best_loss = avg
-            torch.save({'model_state_dict': model.state_dict(), 'phase': 'full', 'iteration': it},
+            torch.save({'model_state_dict': model.state_dict(), 'phase': 'full', 'iteration': it,
+                        'action_dim': NUM_ACTIONS},
                        f"models/world_model_{args.phase}_best.pth")
             print(f"    [BEST] {best_loss:.4f} (Saved best checkpoint)")
-        
-        torch.save({'model_state_dict': model.state_dict(), 'phase': 'full', 'iteration': it},
+
+        torch.save({'model_state_dict': model.state_dict(), 'phase': 'full', 'iteration': it,
+                    'action_dim': NUM_ACTIONS},
                    f"models/world_model_{args.phase}_iter_{it+1}.pth")
         print(f"    [SAVED] Iteration {it+1} checkpoint")
-    
-    torch.save({'model_state_dict': model.state_dict(), 'phase': 'full_done'},
+
+    torch.save({'model_state_dict': model.state_dict(), 'phase': 'full_done', 'action_dim': NUM_ACTIONS},
                f"models/world_model_{args.phase}_final.pth")
     print(f"\n[PHASE 2] Complete. Best loss: {best_loss:.4f}")
 

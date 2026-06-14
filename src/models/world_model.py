@@ -262,3 +262,13 @@ class WorldModel(WorldModelV7):
         corrected_pred = self._apply_scale_correction(base_pred, raw_scale, action_onehot)
         
         return next_state, corrected_pred
+
+
+def create_world_model(state_dim=128, num_actions=67, gnn_layers=6, **kwargs):
+    """Factory retained for older scripts that import create_world_model."""
+    return WorldModel(
+        state_dim=state_dim,
+        action_dim=num_actions,
+        gnn_layers=gnn_layers,
+        **kwargs,
+    )

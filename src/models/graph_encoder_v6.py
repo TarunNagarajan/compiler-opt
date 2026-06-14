@@ -17,7 +17,14 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import RGCNConv
 from torch_geometric.nn.aggr import AttentionalAggregation
-from torch_scatter import scatter_mean, scatter_max
+try:
+    from torch_scatter import scatter_mean, scatter_max
+except (ImportError, OSError):
+    from torch_geometric.utils import scatter
+    def scatter_mean(src, index, dim=0, dim_size=None):
+        return scatter(src, index, dim=dim, dim_size=dim_size, reduce='mean')
+    def scatter_max(src, index, dim=0, dim_size=None):
+        return scatter(src, index, dim=dim, dim_size=dim_size, reduce='max')
 
 
 class GNNEncoderV6(nn.Module):

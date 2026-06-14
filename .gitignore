@@ -28,3 +28,46 @@ CMakeCache.txt
 
 __pycache__/
 *.pyc
+
+# Python environments and local caches
+/.venv/
+/venv/
+/env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Training artifacts and local experiment outputs
+logs/
+models/*.pth
+models/*.pt
+models/*.log
+models/*.json
+results/*.json
+media/
+tui/target/
+
+# Local scratch files and crash dumps
+*.stackdump
+*.tmp
+*.bak
+*.swp
+*_tmp.py
+sweep_*.txt
+notepad.txt
+claude-resume.txt
+paper_draft.tex
+dashboard.html
+forward_euler.csv
+g3states.h
+0
+benchmarks/_quarantine/
+generate_visualizations.py
+log-check.py
+manim_*.py
+timetest.py
+trainer-logs.py
+
+# Local tool/vendor drops
+tools/
+smartpay_fixed/

@@ -1,4 +1,5 @@
 import subprocess
+import statistics
 import time
 import tempfile
 import hashlib
@@ -31,6 +32,24 @@ class MetricsCollector:
     
     def __init__(self):
         self.temp_dir = Path(tempfile.mkdtemp())
+        self.last_runtime_stats = {
+            'value': 0.0,
+            'sample_count': 0,
+            'raw_sample_count': 0,
+            'all_per_iter_samples': [],
+            'filtered_per_iter_samples': [],
+            'timed_out_runs': 0,
+            'failed_runs': 0,
+            'outlier_dropped': 0,
+            'mean': 0.0,
+            'std': 0.0,
+            'se': 0.0,
+            'cv_pct': 100.0,
+            'ci95_half_width': 0.0,
+            'relative_ci95_pct': 100.0,
+            'aggregation': 'median',
+            'reliable': False,
+        }
     
     def count_instructions(self, ir_path: str) -> int:
         count = 0
@@ -110,7 +129,76 @@ class MetricsCollector:
         except Exception as e:
             return False, "", str(e)
 
-    def measure_runtime(self, ir_path: str, iterations: int = 1, args: list = None, loop_count: int = 100) -> float:
+    def _aggregate_runtime_samples(self, samples: list[float], aggregation: str) -> float:
+        if not samples:
+            return 0.0
+
+        mode = str(aggregation).strip().lower()
+        if mode == "min":
+            return min(samples)
+        if mode == "mean":
+            return float(statistics.fmean(samples))
+        if mode == "median":
+            return float(statistics.median(samples))
+        raise ValueError(f"Unsupported runtime aggregation '{aggregation}'. Expected one of: min, mean, median")
+
+    def _mad_filter(self, samples: list[float], z_thresh: float = 3.5) -> list[float]:
+        if len(samples) < 4:
+            return list(samples)
+        med = statistics.median(samples)
+        abs_dev = [abs(x - med) for x in samples]
+        mad = statistics.median(abs_dev)
+        if mad <= 0.0:
+            return list(samples)
+        sigma = 1.4826 * mad
+        if sigma <= 0.0:
+            return list(samples)
+        kept = [x for x in samples if abs(x - med) <= z_thresh * sigma]
+        return kept if kept else list(samples)
+
+    def _summarize_runtime_samples(self, cycles_samples: list[float], loop_count: int, aggregation: str) -> dict:
+        all_per_iter = [x / float(loop_count) for x in cycles_samples]
+        filtered = self._mad_filter(cycles_samples)
+        per_iter = [x / float(loop_count) for x in filtered]
+        value = self._aggregate_runtime_samples(per_iter, aggregation)
+
+        mean_v = float(statistics.fmean(per_iter)) if per_iter else 0.0
+        std_v = float(statistics.pstdev(per_iter)) if len(per_iter) > 1 else 0.0
+        se_v = (std_v / (len(per_iter) ** 0.5)) if len(per_iter) > 1 else 0.0
+        ci95_v = 1.96 * se_v
+        rel_ci_pct = (abs(ci95_v / value) * 100.0) if abs(value) > 1e-12 else 100.0
+        cv_pct = (abs(std_v / mean_v) * 100.0) if abs(mean_v) > 1e-12 else 100.0
+
+        return {
+            'value': float(value),
+            'sample_count': len(per_iter),
+            'raw_sample_count': len(cycles_samples),
+            'all_per_iter_samples': all_per_iter,
+            'filtered_per_iter_samples': per_iter,
+            'outlier_dropped': max(0, len(cycles_samples) - len(per_iter)),
+            'mean': mean_v,
+            'std': std_v,
+            'se': float(se_v),
+            'cv_pct': float(cv_pct),
+            'ci95_half_width': float(ci95_v),
+            'relative_ci95_pct': float(rel_ci_pct),
+            'aggregation': str(aggregation).strip().lower(),
+        }
+
+    def get_last_runtime_stats(self) -> dict:
+        return dict(self.last_runtime_stats)
+
+    def measure_runtime(
+        self,
+        ir_path: str,
+        iterations: int = 1,
+        args: list = None,
+        loop_count: int = 100,
+        timeout_seconds: float = 20.0,
+        aggregation: str = "median",
+        max_iterations: Optional[int] = None,
+        target_rel_ci95_pct: Optional[float] = 2.5,
+    ) -> float:
         """
         Measures CPU Cycles using the Super-Harness + Warm Loop.
         1. Renames main -> benchmark_main
@@ -246,31 +334,69 @@ int main(int argc, char** argv) {{
         # 4. Measure with Super-Harness
         try:
             cycles_list = []
-            num_runs = max(1, int(iterations))
-            for _ in range(num_runs):
+            timed_out_runs = 0
+            failed_runs = 0
+            min_runs = max(1, int(iterations))
+            max_runs = max(min_runs, int(max_iterations)) if max_iterations is not None else min_runs
+            for _ in range(max_runs):
                 cmd = [str(harness_exe), str(exe_path)] + [str(a) for a in args]
                 try:
-                    run_res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    run_res = subprocess.run(cmd, capture_output=True, text=True, timeout=float(timeout_seconds))
                 except subprocess.TimeoutExpired:
+                    timed_out_runs += 1
                     continue
                 except Exception:
+                    failed_runs += 1
                     continue
                 if run_res.returncode != 0:
+                    failed_runs += 1
                     continue
                 m = re.search(r'\[HARNESS_CYCLES\] (\d+)', run_res.stdout)
                 if m:
                     cycles_list.append(float(m.group(1)))
+                else:
+                    failed_runs += 1
+
+                if len(cycles_list) >= min_runs and target_rel_ci95_pct is not None:
+                    stats_now = self._summarize_runtime_samples(cycles_list, loop_count=loop_count, aggregation=aggregation)
+                    if stats_now['relative_ci95_pct'] <= float(target_rel_ci95_pct):
+                        break
             
             if cycles_list:
-                # Minimum of runs (the noise-free "truth")
-                min_cycles = min(cycles_list) / float(loop_count) # Per-iteration cycles
-                return min_cycles
+                stats = self._summarize_runtime_samples(cycles_list, loop_count=loop_count, aggregation=aggregation)
+                stats['timed_out_runs'] = int(timed_out_runs)
+                stats['failed_runs'] = int(failed_runs)
+                stats['reliable'] = bool(
+                    stats['sample_count'] >= min_runs
+                    and stats['relative_ci95_pct'] <= float(target_rel_ci95_pct if target_rel_ci95_pct is not None else 1e9)
+                )
+                self.last_runtime_stats = stats
+                return float(stats['value'])
                 
         finally:
             # Cleanup
             for p in [driver_c, tmp_ir, exe_path]:
                 try: p.unlink()
                 except: pass
+
+        self.last_runtime_stats = {
+            'value': 0.0,
+            'sample_count': 0,
+            'raw_sample_count': 0,
+            'all_per_iter_samples': [],
+            'filtered_per_iter_samples': [],
+            'timed_out_runs': 0,
+            'failed_runs': 0,
+            'outlier_dropped': 0,
+            'mean': 0.0,
+            'std': 0.0,
+            'se': 0.0,
+            'cv_pct': 100.0,
+            'ci95_half_width': 0.0,
+            'relative_ci95_pct': 100.0,
+            'aggregation': str(aggregation).strip().lower(),
+            'reliable': False,
+        }
         
         return 0.0
 

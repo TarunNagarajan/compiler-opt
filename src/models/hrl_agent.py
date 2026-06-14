@@ -2,10 +2,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .negotiation import NegotiationModule
-from .hrl_agent_v5 import GRUPassHistoryEncoder
-from .hrl_worker_v8 import HRLWorker
+from .hrl_worker import HRLWorker
 from ..actions.micro_actions import NUM_MICRO_ACTIONS
 from ..config import NUM_ATOMIC_ACTIONS
+
+
+class GRUPassHistoryEncoder(nn.Module):
+    """Encode the variable-length sequence of applied passes."""
+
+    def __init__(self, num_actions, embed_dim=16, hidden_dim=32):
+        super().__init__()
+        self.action_embed = nn.Embedding(num_actions + 1, embed_dim, padding_idx=0)
+        self.gru = nn.GRU(
+            input_size=embed_dim,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+        )
+
+    def forward(self, action_history):
+        embedded = self.action_embed(action_history)
+        _, hidden = self.gru(embedded)
+        return hidden.squeeze(0)
+
 
 class HRLAgent(nn.Module):
     """
